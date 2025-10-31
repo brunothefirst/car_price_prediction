@@ -1,5 +1,9 @@
 python-dotenv
 pandas
+polars
+numpy
+matplotlib
+seaborn
 scikit-learn
 xgboost
 lightgbm

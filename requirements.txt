@@ -1,0 +1,7 @@
+python-dotenv
+pandas
+scikit-learn
+xgboost
+lightgbm
+jupyter
+shap

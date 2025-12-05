@@ -8,11 +8,13 @@ This module handles:
 All operations use Polars DataFrames for performance.
 """
 
+import os
 import polars as pl
 import numpy as np
 from pathlib import Path
 from typing import Tuple, Optional, Dict, List
 import warnings
+from src.config import DATA_PATH, PROCESSED_DATA_PATH, MODELS_PATH
 
 warnings.filterwarnings('ignore')
 
@@ -466,28 +468,50 @@ def load_car_data(data_dir: Path, infer_schema_length: int = 0) -> pl.DataFrame:
     pl.DataFrame
         Concatenated DataFrame from all CSV files
     """
+    #csv_files = list(data_dir.glob("*.csv"))
+    #
+    #if not csv_files:
+    #    raise FileNotFoundError(f"No CSV files found in {data_dir}")
+    #
+    #print(f"📂 Found {len(csv_files)} CSV file(s)")
+    #
+    #dataframes = []
+    #total_rows = 0
+    #
+    #for file_path in csv_files:
+    #    df = pl.read_csv(file_path, infer_schema_length=infer_schema_length)
+    #    dataframes.append(df)
+    #    rows = df.height
+    #    total_rows += rows
+    #    print(f"   {file_path.name}: {rows:,} rows × {df.width} columns")
+    #
+    ## Concatenate all dataframes
+    #df_combined = pl.concat(dataframes, how="vertical")
+    #print(f"✅ Total: {df_combined.height:,} rows × {df_combined.width} columns\n")
+    #
+    #return df_combined
+
+    # Find all CSV files
     csv_files = list(data_dir.glob("*.csv"))
-    
-    if not csv_files:
-        raise FileNotFoundError(f"No CSV files found in {data_dir}")
-    
-    print(f"📂 Found {len(csv_files)} CSV file(s)")
-    
-    dataframes = []
+
+    dataframes = {}
     total_rows = 0
-    
+
     for file_path in csv_files:
-        df = pl.read_csv(file_path, infer_schema_length=infer_schema_length)
-        dataframes.append(df)
-        rows = df.height
-        total_rows += rows
-        print(f"   {file_path.name}: {rows:,} rows × {df.width} columns")
-    
-    # Concatenate all dataframes
-    df_combined = pl.concat(dataframes, how="vertical")
-    print(f"✅ Total: {df_combined.height:,} rows × {df_combined.width} columns\n")
-    
+
+        df = pl.read_csv(
+            file_path,
+            infer_schema_length=0,
+            #encoding="utf8",
+        )
+
+        dataframes[file_path.stem] = df
+
+    df_combined = pl.concat(dataframes.values(), how="vertical")
+    print(df_combined.shape)
+
     return df_combined
+
 
 
 # Convenience function for quick processing

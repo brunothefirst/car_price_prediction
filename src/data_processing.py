@@ -137,7 +137,9 @@ class CarDataProcessor:
             pl.col('year_numeric').alias('year'), 
             pl.col('km_numeric').alias('km'),
             pl.col('marque').alias('brand'),
-            pl.col('modele').alias('model')
+            pl.col('modele').alias('model'),
+            pl.col('energie'),
+            pl.col('puissance_din')
         ]).filter(
             pl.col('price').is_not_null()
         )
@@ -364,7 +366,7 @@ class CarDataProcessor:
             (pl.col('log_price') <= pl.col('upper_bound_log_price')) &
             (pl.col('km') >= pl.col('lower_bound_km')) &
             (pl.col('km') <= pl.col('upper_bound_km'))
-        ).select(['price', 'year', 'km', 'brand', 'model'])
+        ).select(['price', 'year', 'km', 'brand', 'model', 'energie', 'puissance_din'])
         
         rows_after = df_clean.height
         

@@ -14,7 +14,7 @@ import numpy as np
 from pathlib import Path
 from typing import Tuple, Optional, Dict, List
 import warnings
-from src.config import DATA_PATH, PROCESSED_DATA_PATH, MODELS_PATH
+from config import DATA_PATH, PROCESSED_DATA_PATH, MODELS_PATH
 
 warnings.filterwarnings('ignore')
 

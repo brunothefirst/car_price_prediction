@@ -42,7 +42,9 @@ Example:
 
 import numpy as np
 import polars as pl
+import pandas as pd
 from sklearn.base import BaseEstimator, TransformerMixin
+from sklearn.preprocessing import StandardScaler
 from typing import Dict, Optional, Union, Tuple
 import warnings
 
@@ -147,7 +149,9 @@ class CarPriceFeatureEngineer(BaseEstimator, TransformerMixin):
         add_polynomial_features: bool = True,
         add_target_encoding: bool = True,
         add_categorical_features: bool = True,
-        add_interaction_features: bool = True
+        add_interaction_features: bool = True,
+        standardize: bool = True,
+        brand_onehot: bool = False
     ):
         self.current_year = current_year
         self.min_samples_for_encoding = min_samples_for_encoding
@@ -156,11 +160,13 @@ class CarPriceFeatureEngineer(BaseEstimator, TransformerMixin):
         self.add_target_encoding = add_target_encoding
         self.add_categorical_features = add_categorical_features
         self.add_interaction_features = add_interaction_features
+        self.standardize = standardize
+        self.brand_onehot = brand_onehot
         
         # Initialize attributes for learned statistics
-        self.brand_price_stats_: Dict[str, Tuple[float, float, float, int]] = {}
+        self.brand_price_stats_: Dict[str, Tuple[float, float, float, int]] = {}  # log_price stats
         self.model_price_stats_: Dict[str, Tuple[float, float, float, int]] = {}
-        self.brand_km_stats_: Dict[str, Tuple[float, float, int]] = {}
+        self.brand_km_stats_: Dict[str, Tuple[float, float, float, int]] = {}  # km_mean, km_median, age_mean, age_median
         self.model_km_stats_: Dict[str, Tuple[float, float, int]] = {}
         self.km_percentiles_: Dict[str, float] = {}
         self.global_mean_: Optional[float] = None
@@ -168,6 +174,8 @@ class CarPriceFeatureEngineer(BaseEstimator, TransformerMixin):
         self.global_std_: Optional[float] = None
         self.global_km_mean_: Optional[float] = None
         self.global_age_mean_: Optional[float] = None
+        self.scaler: Optional[StandardScaler] = None
+        self.brand_columns_: list = []  # Store brand dummy column names
         self.is_fitted_: bool = False
     
     def fit(self, X: Union[pl.DataFrame, np.ndarray], y: Union[pl.Series, np.ndarray] = None):
@@ -214,11 +222,13 @@ class CarPriceFeatureEngineer(BaseEstimator, TransformerMixin):
         else:
             y_arr = None
         
-        # Compute global statistics
+        # Compute global statistics (use log_price for brand aggregates)
         if y_arr is not None:
-            self.global_mean_ = float(np.mean(y_arr))
-            self.global_median_ = float(np.median(y_arr))
-            self.global_std_ = float(np.std(y_arr))
+            # Compute log_price for aggregates
+            log_price = np.log(y_arr)
+            self.global_mean_ = float(np.mean(log_price))
+            self.global_median_ = float(np.median(log_price))
+            self.global_std_ = float(np.std(log_price))
         
         # Get column names (handle potential aliases)
         km_col ="km" #self._get_column_name(X_df, ['kilometers', 'km', 'kilometrage'])
@@ -369,61 +379,105 @@ class CarPriceFeatureEngineer(BaseEstimator, TransformerMixin):
             ])
         
         if self.add_polynomial_features:
+            # Rename km to mileage for consistency
             X_df = X_df.with_columns([
+                pl.col(km_col).alias('mileage')
+            ])
+            
+            # Add polynomial features for age and mileage
+            X_df = X_df.with_columns([
+                (pl.col('car_age') ** 2).alias('age_squared'),
+                (pl.col('car_age') ** 3).alias('age_cubed'),
+                (pl.col('mileage') ** 2).alias('mileage_squared'),
+                (pl.col('mileage') ** 3).alias('mileage_cubed'),
+                # Legacy features
                 (pl.col(km_col).sqrt()).alias('sqrt_km'),
                 (pl.col('car_age') ** 2).alias('car_age_squared')
             ])
         
         # ============================================================
-        # BRAND AGGREGATE FEATURES (6)
+        # BRAND FEATURES: ONE-HOT ENCODING OR AGGREGATES (7)
         # ============================================================
         
         brand_values = X_df[brand_col].to_list()
         
-        brand_counts = []
-        brand_avg_km = []
-        brand_avg_age = []
-        brand_avg_price = []
-        brand_median_price = []
-        brand_price_std = []
-        
-        for brand in brand_values:
-            if brand in self.brand_km_stats_:
-                km_mean, age_mean, count = self.brand_km_stats_[brand]
-                brand_counts.append(count)
-                brand_avg_km.append(km_mean)
-                brand_avg_age.append(age_mean)
-            else:
-                # Unseen brand - use global statistics
-                brand_counts.append(0)
-                brand_avg_km.append(self.global_km_mean_)
-                brand_avg_age.append(self.global_age_mean_)
+        if self.brand_onehot:
+            # Option 1: One-hot encode brand (skip aggregates)
+            # Convert to pandas for get_dummies, then back to polars
+            df_pandas = X_df.to_pandas()
+            brand_dummies = pd.get_dummies(df_pandas[brand_col], prefix='brand', drop_first=True)
             
-            # Target encoding (price statistics)
-            if self.add_target_encoding:
-                if brand in self.brand_price_stats_:
-                    price_mean, price_median, price_std, _ = self.brand_price_stats_[brand]
-                    brand_avg_price.append(price_mean)
-                    brand_median_price.append(price_median)
-                    brand_price_std.append(price_std)
+            # Store column names during fit
+            if not self.is_fitted_:
+                self.brand_columns_ = brand_dummies.columns.tolist()
+            
+            # During transform, ensure same columns as training
+            if self.is_fitted_:
+                # Add missing columns (unseen brands in test set)
+                for col in self.brand_columns_:
+                    if col not in brand_dummies.columns:
+                        brand_dummies[col] = 0
+                # Keep only training columns
+                brand_dummies = brand_dummies[self.brand_columns_]
+            
+            # Add dummies to dataframe
+            df_pandas = pd.concat([df_pandas.drop(columns=[brand_col]), brand_dummies], axis=1)
+            X_df = pl.from_pandas(df_pandas)
+            
+        else:
+            # Option 2: Create brand aggregate features (default)
+            brand_avg_km = []
+            brand_median_km = []
+            brand_avg_age = []
+            brand_median_age = []
+            brand_mean_log_price = []
+            brand_median_log_price = []
+            brand_std_log_price = []
+            
+            for brand in brand_values:
+                if brand in self.brand_km_stats_:
+                    km_mean, km_median, age_mean, age_median = self.brand_km_stats_[brand]
+                    brand_avg_km.append(km_mean)
+                    brand_median_km.append(km_median)
+                    brand_avg_age.append(age_mean)
+                    brand_median_age.append(age_median)
                 else:
                     # Unseen brand - use global statistics
-                    brand_avg_price.append(self.global_mean_)
-                    brand_median_price.append(self.global_median_)
-                    brand_price_std.append(self.global_std_)
-        
-        X_df = X_df.with_columns([
-            pl.Series('brand_count', brand_counts),
-            pl.Series('brand_avg_km', brand_avg_km),
-            pl.Series('brand_avg_age', brand_avg_age)
-        ])
-        
-        if self.add_target_encoding:
+                    brand_avg_km.append(self.global_km_mean_)
+                    brand_median_km.append(self.global_km_mean_)  # Use mean as fallback
+                    brand_avg_age.append(self.global_age_mean_)
+                    brand_median_age.append(self.global_age_mean_)  # Use mean as fallback
+                
+                # Target encoding (log_price statistics)
+                if self.add_target_encoding:
+                    if brand in self.brand_price_stats_:
+                        log_price_mean, log_price_median, log_price_std, _ = self.brand_price_stats_[brand]
+                        brand_mean_log_price.append(log_price_mean)
+                        brand_median_log_price.append(log_price_median)
+                        brand_std_log_price.append(log_price_std)
+                    else:
+                        # Unseen brand - use global statistics
+                        brand_mean_log_price.append(self.global_mean_)
+                        brand_median_log_price.append(self.global_median_)
+                        brand_std_log_price.append(self.global_std_)
+            
+            # Add aggregate features
             X_df = X_df.with_columns([
-                pl.Series('brand_avg_price', brand_avg_price),
-                pl.Series('brand_median_price', brand_median_price),
-                pl.Series('brand_price_std', brand_price_std)
+                pl.Series('brand_avg_km', brand_avg_km),
+                pl.Series('brand_median_km', brand_median_km),
+                pl.Series('brand_avg_age', brand_avg_age),
+                pl.Series('brand_median_age', brand_median_age)
             ])
+            
+            if self.add_target_encoding:
+                X_df = X_df.with_columns([
+                    pl.Series('brand_mean_log_price', brand_mean_log_price),
+                    pl.Series('brand_median_log_price', brand_median_log_price),
+                    pl.Series('brand_std_log_price', brand_std_log_price)
+                ])
+            
+            # Drop original brand column
+            X_df = X_df.drop(brand_col)
         
         # ============================================================
         # MODEL AGGREGATE FEATURES (3) + RELATIVE FEATURES (1)
@@ -472,23 +526,59 @@ class CarPriceFeatureEngineer(BaseEstimator, TransformerMixin):
                 pl.Series('model_avg_price', model_avg_price),
                 pl.Series('model_median_price', model_median_price)
             ])
-        
-        # ============================================================
-        # INTERACTION FEATURES (4)
+                # Drop model column after features are created
+        X_df = X_df.drop(model_col)
+                # ============================================================
+        # INTERACTION FEATURES (7)
         # ============================================================
         
         if self.add_interaction_features:
+            # Ensure mileage column exists for interactions
+            if 'mileage' not in X_df.columns:
+                X_df = X_df.with_columns([pl.col(km_col).alias('mileage')])
+            
             X_df = X_df.with_columns([
-                # Age × Mileage interaction (heavily used old cars)
+                # Polynomial interaction features (new)
+                (pl.col('car_age') * pl.col('mileage')).alias('age_mileage'),
+                ((pl.col('car_age') ** 2) * pl.col('mileage')).alias('age_squared_mileage'),
+                (pl.col('car_age') * (pl.col('mileage') ** 2)).alias('age_mileage_squared'),
+                
+                # Legacy interaction (heavily used old cars)
                 (pl.col('car_age') * pl.col(km_col) / 1000).alias('age_km_interaction'),
                 
-                # Is this a low-mileage recent car? (barely used)
+                # Boolean combinations
                 ((pl.col('car_age') < 5) & (pl.col(km_col) < 50000)).alias('is_low_use_recent'),
-                
-                # Unusual combinations
                 ((pl.col('car_age') < 3) & (pl.col(km_col) > 150000)).alias('is_high_use_new'),
                 ((pl.col('car_age') > 15) & (pl.col(km_col) < 50000)).alias('is_garage_queen')
             ])
+        
+        # ============================================================
+        # Z-SCORE STANDARDIZATION (optional, applied last)
+        # ============================================================
+        
+        if self.standardize:
+            # Convert to pandas for StandardScaler
+            df_pandas = X_df.to_pandas()
+            
+            # Get numeric columns
+            numeric_cols = df_pandas.select_dtypes(include=[np.number]).columns.tolist()
+            
+            # Exclude target variables and ID columns from standardization
+            exclude_cols = ['price', 'log_price', 'id', 'car_id', 'listing_id', year_col]
+            numeric_cols = [c for c in numeric_cols if c not in exclude_cols]
+            
+            if self.is_fitted_ and self.scaler is not None:
+                # Transform using fitted scaler
+                df_pandas[numeric_cols] = self.scaler.transform(df_pandas[numeric_cols])
+            else:
+                # Fit and transform (during fit_transform)
+                self.scaler = StandardScaler()
+                df_pandas[numeric_cols] = self.scaler.fit_transform(df_pandas[numeric_cols])
+            
+            # Convert back to polars
+            X_df = pl.from_pandas(df_pandas)
+        else:
+            self.scaler = None
         
         return X_df
     
@@ -587,18 +677,21 @@ class CarPriceFeatureEngineer(BaseEstimator, TransformerMixin):
         # Compute statistics
         for brand in brand_km:
             km_mean = float(np.mean(brand_km[brand]))
+            km_median = float(np.median(brand_km[brand]))
             age_mean = float(np.mean(brand_age[brand]))
+            age_median = float(np.median(brand_age[brand]))
             count = len(brand_km[brand])
-            self.brand_km_stats_[brand] = (km_mean, age_mean, count)
+            self.brand_km_stats_[brand] = (km_mean, km_median, age_mean, age_median)
             
-            # Price statistics (target encoding)
+            # Price statistics (target encoding) - use log_price
             if y_arr is not None and brand in brand_price:
-                prices = brand_price[brand]
+                prices = np.array(brand_price[brand])
                 if len(prices) >= self.min_samples_for_encoding:
-                    price_mean = float(np.mean(prices))
-                    price_median = float(np.median(prices))
-                    price_std = float(np.std(prices)) if len(prices) > 1 else self.global_std_
-                    self.brand_price_stats_[brand] = (price_mean, price_median, price_std, len(prices))
+                    log_prices = np.log(prices)
+                    log_price_mean = float(np.mean(log_prices))
+                    log_price_median = float(np.median(log_prices))
+                    log_price_std = float(np.std(log_prices)) if len(log_prices) > 1 else self.global_std_
+                    self.brand_price_stats_[brand] = (log_price_mean, log_price_median, log_price_std, len(prices))
                 # Categories with few samples don't get their own encoding
                 # They'll use global mean in transform()
     
@@ -685,5 +778,7 @@ class CarPriceFeatureEngineer(BaseEstimator, TransformerMixin):
             f"add_polynomial_features={self.add_polynomial_features}, "
             f"add_target_encoding={self.add_target_encoding}, "
             f"add_categorical_features={self.add_categorical_features}, "
-            f"add_interaction_features={self.add_interaction_features})"
+            f"add_interaction_features={self.add_interaction_features}, "
+            f"standardize={self.standardize}, "
+            f"brand_onehot={self.brand_onehot})")
         )

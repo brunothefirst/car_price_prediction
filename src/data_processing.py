@@ -14,6 +14,7 @@ import numpy as np
 from pathlib import Path
 from typing import Tuple, Optional, Dict, List
 import warnings
+import re
 from config import DATA_PATH, PROCESSED_DATA_PATH, MODELS_PATH
 
 warnings.filterwarnings('ignore')
@@ -25,14 +26,14 @@ class CarDataProcessor:
     
     Parameters
     ----------
-    min_brand_threshold : int, default=50
+    min_brand_count : int, default=400
         Minimum number of cars required to keep a brand
-    rare_brand_threshold : int, default=600
-        Threshold below which brands are grouped by price tier
     price_iqr_multiplier : float, default=1.5
         IQR multiplier for price outlier detection
     km_iqr_multiplier : float, default=1.5
         IQR multiplier for kilometer outlier detection
+    hp_iqr_multiplier : float, default=1.5
+        IQR multiplier for horsepower outlier detection
     min_year : int, default=1990
         Minimum car year to keep (removes antique cars)
     verbose : bool, default=True
@@ -41,17 +42,17 @@ class CarDataProcessor:
     
     def __init__(
         self,
-        min_brand_threshold: int = 50,
-        rare_brand_threshold: int = 600,
+        min_brand_count: int = 400,
         price_iqr_multiplier: float = 1.5,
         km_iqr_multiplier: float = 1.5,
+        hp_iqr_multiplier: float = 1.5,
         min_year: int = 1990,
         verbose: bool = True
     ):
-        self.min_brand_threshold = min_brand_threshold
-        self.rare_brand_threshold = rare_brand_threshold
+        self.min_brand_count = min_brand_count
         self.price_iqr_multiplier = price_iqr_multiplier
         self.km_iqr_multiplier = km_iqr_multiplier
+        self.hp_iqr_multiplier = hp_iqr_multiplier
         self.min_year = min_year
         self.verbose = verbose
         
@@ -62,6 +63,33 @@ class CarDataProcessor:
         """Print message if verbose is True."""
         if self.verbose:
             print(message)
+    
+    @staticmethod
+    def _normalize_text(text: str) -> str:
+        """Normalize text by converting to lowercase, removing accents, and cleaning special characters."""
+        if not text or not isinstance(text, str):
+            return text
+        
+        # Convert to lowercase and strip
+        text = text.lower().strip()
+        
+        # Convert common accented characters
+        accent_map = {
+            'é': 'e', 'è': 'e', 'ê': 'e', 'ë': 'e',
+            'à': 'a', 'â': 'a', 'ä': 'a',
+            'ù': 'u', 'û': 'u', 'ü': 'u',
+            'ô': 'o', 'ö': 'o',
+            'î': 'i', 'ï': 'i',
+            'ç': 'c',
+            'ñ': 'n'
+        }
+        for accent, replacement in accent_map.items():
+            text = text.replace(accent, replacement)
+        
+        # Remove all non-alphanumeric characters except spaces
+        text = re.sub(r'[^a-z0-9\s]', '', text)
+        
+        return text
     
     def clean_data(self, df: pl.DataFrame) -> pl.DataFrame:
         """
@@ -80,19 +108,22 @@ class CarDataProcessor:
         self._log("🧹 Starting data cleaning pipeline...")
         self._log("=" * 60)
         
-        # Step 1: Data type conversion
+        # Step 1: Data type conversion and text normalization
         df = self._convert_data_types(df)
         
-        # Step 2: Brand filtering and grouping
-        df = self._filter_and_group_brands(df)
-        
-        # Step 3: Remove antique cars
+        # Step 2: Remove antique cars
         df = self._remove_antique_cars(df)
         
-        # Step 4: Remove 'autre' entries
+        # Step 3: Remove 'autre' entries
         df = self._remove_autre_entries(df)
         
-        # Step 5: IQR outlier detection
+        # Step 4: Clean horsepower (hard bounds + IQR per brand)
+        df = self._clean_horsepower(df)
+        
+        # Step 5: Drop rare brands
+        df = self._filter_rare_brands(df)
+        
+        # Step 6: IQR outlier detection for price and km
         df = self._remove_outliers_iqr(df)
         
         self._log("\n✅ Data cleaning completed!")
@@ -102,7 +133,7 @@ class CarDataProcessor:
     
     def _convert_data_types(self, df: pl.DataFrame) -> pl.DataFrame:
         """
-        Convert string columns to appropriate numeric types.
+        Convert string columns to appropriate numeric types and normalize text.
         
         Parameters
         ----------
@@ -112,9 +143,9 @@ class CarDataProcessor:
         Returns
         -------
         pl.DataFrame
-            DataFrame with numeric types
+            DataFrame with numeric types and normalized text
         """
-        self._log("\n1️⃣ Converting data types...")
+        self._log("\n1️⃣ Converting data types and normalizing text...")
         
         # Clean price column
         df = df.with_columns(
@@ -131,13 +162,19 @@ class CarDataProcessor:
             pl.col("kilometrage").str.replace_all(r"[, km]", "").cast(pl.Float64, strict=False).alias("km_numeric")
         ])
         
+        # Normalize brand and model text
+        df = df.with_columns([
+            pl.col('marque').map_elements(self._normalize_text, return_dtype=pl.Utf8).alias('brand_normalized'),
+            pl.col('modele').map_elements(self._normalize_text, return_dtype=pl.Utf8).alias('model_normalized')
+        ])
+        
         # Create simplified DataFrame with renamed columns
         df_clean = df.select([
             pl.col('price_numeric').alias('price'),
             pl.col('year_numeric').alias('year'), 
             pl.col('km_numeric').alias('km'),
-            pl.col('marque').alias('brand'),
-            pl.col('modele').alias('model'),
+            pl.col('brand_normalized').alias('brand'),
+            pl.col('model_normalized').alias('model'),
             pl.col('energie'),
             pl.col('puissance_din')
         ]).filter(
@@ -146,21 +183,29 @@ class CarDataProcessor:
         
         rows_before = df.height
         rows_after = df_clean.height
+        
+        # Log unique brands and models
+        n_brands = df_clean['brand'].n_unique()
+        n_models = df_clean['model'].n_unique()
+        
         self.cleaning_stats['type_conversion'] = {
             'rows_before': rows_before,
             'rows_after': rows_after,
-            'rows_removed': rows_before - rows_after
+            'rows_removed': rows_before - rows_after,
+            'unique_brands': n_brands,
+            'unique_models': n_models
         }
         
         self._log(f"   Original: {rows_before:,} rows")
         self._log(f"   After conversion: {rows_after:,} rows")
         self._log(f"   Removed (invalid price): {rows_before - rows_after:,}")
+        self._log(f"   Unique brands: {n_brands}, Unique models: {n_models}")
         
         return df_clean
     
-    def _filter_and_group_brands(self, df: pl.DataFrame) -> pl.DataFrame:
+    def _filter_rare_brands(self, df: pl.DataFrame) -> pl.DataFrame:
         """
-        Filter out very rare brands and group medium-frequency brands by price tier.
+        Drop brands with fewer than min_brand_count observations.
         
         Parameters
         ----------
@@ -170,81 +215,33 @@ class CarDataProcessor:
         Returns
         -------
         pl.DataFrame
-            DataFrame with filtered and grouped brands
+            DataFrame with rare brands removed
         """
-        self._log("\n2️⃣ Filtering and grouping brands...")
+        self._log(f"\n5️⃣ Dropping rare brands (<{self.min_brand_count} cars)...")
         
         # Calculate brand frequencies
-        brand_freq = df.group_by('brand').len().sort('len', descending=True)
+        brand_counts = df.group_by('brand').len().rename({'len': 'count'})
         
-        # Remove brands with very few cars
-        brands_to_remove = brand_freq.filter(pl.col('len') < self.min_brand_threshold)['brand'].to_list()
-        df_filtered = df.filter(~pl.col('brand').is_in(brands_to_remove))
+        # Identify valid and rare brands
+        valid_brands = brand_counts.filter(pl.col('count') >= self.min_brand_count)['brand'].to_list()
+        rare_brands = brand_counts.filter(pl.col('count') < self.min_brand_count)
         
-        self.cleaning_stats['brand_removal'] = {
-            'brands_removed': len(brands_to_remove),
-            'cars_removed': brands_to_remove and brand_freq.filter(
-                pl.col('brand').is_in(brands_to_remove)
-            )['len'].sum() or 0
+        n_dropped_brands = rare_brands.height
+        n_dropped_cars = rare_brands['count'].sum() if n_dropped_brands > 0 else 0
+        
+        # Filter dataset
+        df_filtered = df.filter(pl.col('brand').is_in(valid_brands))
+        
+        self.cleaning_stats['rare_brand_removal'] = {
+            'brands_dropped': n_dropped_brands,
+            'cars_dropped': n_dropped_cars,
+            'brands_remaining': len(valid_brands)
         }
         
-        self._log(f"   Removed {len(brands_to_remove)} brands with <{self.min_brand_threshold} cars")
+        self._log(f"   Dropped {n_dropped_cars:,} cars from {n_dropped_brands} rare brands (< {self.min_brand_count} observations)")
+        self._log(f"   Remaining: {len(valid_brands)} brands")
         
-        # Group rare brands by price tier
-        brands_to_group = brand_freq.filter(
-            (pl.col('len') >= self.min_brand_threshold) & 
-            (pl.col('len') < self.rare_brand_threshold)
-        )['brand'].to_list()
-        
-        if len(brands_to_group) > 0:
-            # Calculate price thresholds
-            all_prices = df_filtered['price'].to_list()
-            low_price_threshold = np.percentile(all_prices, 33)
-            high_price_threshold = np.percentile(all_prices, 67)
-            
-            # Get average price per brand
-            brand_avg_prices = df_filtered.filter(
-                pl.col('brand').is_in(brands_to_group)
-            ).group_by('brand').agg(
-                pl.col('price').mean().alias('avg_price')
-            )
-            
-            # Categorize brands
-            low_cost_brands = brand_avg_prices.filter(
-                pl.col('avg_price') <= low_price_threshold
-            )['brand'].to_list()
-            
-            luxury_brands = brand_avg_prices.filter(
-                pl.col('avg_price') >= high_price_threshold
-            )['brand'].to_list()
-            
-            standard_brands = brand_avg_prices.filter(
-                (pl.col('avg_price') > low_price_threshold) & 
-                (pl.col('avg_price') < high_price_threshold)
-            )['brand'].to_list()
-            
-            # Apply grouping
-            df_grouped = df_filtered.with_columns(
-                pl.when(pl.col('brand').is_in(low_cost_brands))
-                .then(pl.lit('other_low_cost'))
-                .when(pl.col('brand').is_in(standard_brands))
-                .then(pl.lit('other_standard'))
-                .when(pl.col('brand').is_in(luxury_brands))
-                .then(pl.lit('other_luxury'))
-                .otherwise(pl.col('brand'))
-                .alias('brand')
-            ).with_columns(
-                pl.when(pl.col('brand').str.starts_with('other_'))
-                .then(pl.col('brand'))
-                .otherwise(pl.col('model'))
-                .alias('model')
-            )
-            
-            self._log(f"   Grouped {len(brands_to_group)} brands into price tiers")
-        else:
-            df_grouped = df_filtered
-        
-        return df_grouped
+        return df_filtered
     
     def _remove_antique_cars(self, df: pl.DataFrame) -> pl.DataFrame:
         """
@@ -260,7 +257,7 @@ class CarDataProcessor:
         pl.DataFrame
             DataFrame with antique cars removed
         """
-        self._log(f"\n3️⃣ Removing antique cars (pre-{self.min_year})...")
+        self._log(f"\n2️⃣ Removing antique cars (pre-{self.min_year})...")
         
         rows_before = df.height
         df_modern = df.filter(pl.col('year') >= self.min_year)
@@ -290,7 +287,7 @@ class CarDataProcessor:
         pl.DataFrame
             DataFrame with 'autre' entries removed
         """
-        self._log("\n4️⃣ Removing 'autre' entries...")
+        self._log("\n3️⃣ Removing 'autre' entries...")
         
         rows_before = df.height
         df_no_autre = df.filter(
@@ -309,9 +306,79 @@ class CarDataProcessor:
         
         return df_no_autre
     
+    def _clean_horsepower(self, df: pl.DataFrame) -> pl.DataFrame:
+        """
+        Clean horsepower column: hard bounds, IQR per brand, drop missing.
+        
+        Assumes 'horsepower' column already exists from load_car_data().
+        
+        Parameters
+        ----------
+        df : pl.DataFrame
+            DataFrame with horsepower column
+            
+        Returns
+        -------
+        pl.DataFrame
+            DataFrame with cleaned horsepower
+        """
+        self._log("\n4️⃣ Cleaning horsepower...")
+        
+        rows_initial = df.height
+        
+        # Step 1: Hard bounds (50 - 1000 HP)
+        n_low = (df['horsepower'] < 50).sum()
+        n_high = (df['horsepower'] > 1000).sum()
+        df = df.filter(
+            (df['horsepower'] >= 50) & (df['horsepower'] <= 1000)
+        )
+        
+        # Step 2: IQR outlier removal per brand
+        n_before_iqr = df.height
+        
+        # Calculate per-brand IQR boundaries
+        hp_bounds = df.group_by('brand').agg([
+            pl.col('horsepower').quantile(0.25).alias('q1_hp'),
+            pl.col('horsepower').quantile(0.75).alias('q3_hp'),
+        ]).with_columns([
+            (pl.col('q3_hp') - pl.col('q1_hp')).alias('iqr_hp')
+        ]).with_columns([
+            (pl.col('q1_hp') - self.hp_iqr_multiplier * pl.col('iqr_hp')).alias('lower_bound_hp'),
+            (pl.col('q3_hp') + self.hp_iqr_multiplier * pl.col('iqr_hp')).alias('upper_bound_hp')
+        ])
+        
+        # Join and filter
+        df = df.join(hp_bounds, on='brand', how='left')
+        df = df.filter(
+            (pl.col('horsepower') >= pl.col('lower_bound_hp')) &
+            (pl.col('horsepower') <= pl.col('upper_bound_hp'))
+        ).drop(['q1_hp', 'q3_hp', 'iqr_hp', 'lower_bound_hp', 'upper_bound_hp'])
+        
+        n_outliers = n_before_iqr - df.height
+        
+        # Step 3: Drop missing HP
+        n_missing = df['horsepower'].is_null().sum()
+        df = df.filter(pl.col('horsepower').is_not_null())
+        
+        self.cleaning_stats['horsepower_cleaning'] = {
+            'rows_before': rows_initial,
+            'rows_after': df.height,
+            'dropped_low': n_low,
+            'dropped_high': n_high,
+            'dropped_outliers': n_outliers,
+            'dropped_missing': n_missing,
+            'mean_hp': df['horsepower'].mean(),
+            'median_hp': df['horsepower'].median()
+        }
+        
+        self._log(f"   HP cleaning: dropped {n_low} cars <50HP, {n_high} cars >1000HP, {n_outliers} outliers (IQR per brand), {n_missing} missing HP")
+        self._log(f"   Remaining dataset - Mean HP: {df['horsepower'].mean():.1f}, Median HP: {df['horsepower'].median():.1f}")
+        
+        return df
+    
     def _remove_outliers_iqr(self, df: pl.DataFrame) -> pl.DataFrame:
         """
-        Remove outliers using per-brand IQR method.
+        Remove outliers using per-brand IQR method for price and km.
         
         Parameters
         ----------
@@ -323,7 +390,7 @@ class CarDataProcessor:
         pl.DataFrame
             DataFrame with outliers removed
         """
-        self._log(f"\n5️⃣ Removing outliers (IQR {self.price_iqr_multiplier}× for price, {self.km_iqr_multiplier}× for km)...")
+        self._log(f"\n6️⃣ Removing price/km outliers (IQR {self.price_iqr_multiplier}× for price, {self.km_iqr_multiplier}× for km)...")
         
         # Add log-transformed price and filter invalid data
         df_prepared = df.with_columns([
@@ -366,7 +433,7 @@ class CarDataProcessor:
             (pl.col('log_price') <= pl.col('upper_bound_log_price')) &
             (pl.col('km') >= pl.col('lower_bound_km')) &
             (pl.col('km') <= pl.col('upper_bound_km'))
-        ).select(['price', 'year', 'km', 'brand', 'model', 'energie', 'puissance_din'])
+        ).select(['price', 'year', 'km', 'brand', 'model', 'energie', 'puissance_din', 'horsepower'])
         
         rows_after = df_clean.height
         
@@ -510,6 +577,18 @@ def load_car_data(data_dir: Path, infer_schema_length: int = 0) -> pl.DataFrame:
         dataframes[file_path.stem] = df
 
     df_combined = pl.concat(dataframes.values(), how="vertical")
+    
+    # Parse horsepower from energie column (format: "150 Ch" → 150.0)
+    print("📊 Parsing horsepower from energie column...")
+    df_combined = df_combined.with_columns(
+        pl.col('energie')
+        .str.replace(' Ch', '')
+        .str.strip()
+        .cast(pl.Float64, strict=False)
+        .alias('horsepower')
+    )
+    
+    print(f"✅ Loaded {df_combined.height:,} rows with horsepower parsed")
     print(df_combined.shape)
 
     return df_combined
@@ -519,10 +598,10 @@ def load_car_data(data_dir: Path, infer_schema_length: int = 0) -> pl.DataFrame:
 # Convenience function for quick processing
 def clean_car_data(
     df: pl.DataFrame,
-    min_brand_threshold: int = 50,
-    rare_brand_threshold: int = 600,
+    min_brand_count: int = 400,
     price_iqr_multiplier: float = 1.5,
     km_iqr_multiplier: float = 1.5,
+    hp_iqr_multiplier: float = 1.5,
     min_year: int = 1990,
     verbose: bool = True
 ) -> pl.DataFrame:
@@ -532,15 +611,15 @@ def clean_car_data(
     Parameters
     ----------
     df : pl.DataFrame
-        Raw DataFrame
-    min_brand_threshold : int, default=50
-        Minimum cars per brand
-    rare_brand_threshold : int, default=600
-        Threshold for brand grouping
+        Raw DataFrame (must have 'horsepower' column from load_car_data)
+    min_brand_count : int, default=400
+        Minimum cars per brand to keep
     price_iqr_multiplier : float, default=1.5
         IQR multiplier for price
     km_iqr_multiplier : float, default=1.5
         IQR multiplier for kilometers
+    hp_iqr_multiplier : float, default=1.5
+        IQR multiplier for horsepower
     min_year : int, default=1990
         Minimum car year
     verbose : bool, default=True
@@ -552,10 +631,10 @@ def clean_car_data(
         Cleaned DataFrame
     """
     processor = CarDataProcessor(
-        min_brand_threshold=min_brand_threshold,
-        rare_brand_threshold=rare_brand_threshold,
+        min_brand_count=min_brand_count,
         price_iqr_multiplier=price_iqr_multiplier,
         km_iqr_multiplier=km_iqr_multiplier,
+        hp_iqr_multiplier=hp_iqr_multiplier,
         min_year=min_year,
         verbose=verbose
     )

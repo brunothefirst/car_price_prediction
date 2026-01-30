@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Tuple, Optional, Dict, List
 import warnings
 import re
-from config import DATA_PATH, PROCESSED_DATA_PATH, MODELS_PATH
+from src.config import DATA_PATH, PROCESSED_DATA_PATH, MODELS_PATH
 
 warnings.filterwarnings('ignore')
 
@@ -578,17 +578,18 @@ def load_car_data(data_dir: Path, infer_schema_length: int = 0) -> pl.DataFrame:
 
     df_combined = pl.concat(dataframes.values(), how="vertical")
     
-    # Parse horsepower from energie column (format: "150 Ch" → 150.0)
-    print("📊 Parsing horsepower from energie column...")
+    # Parse horsepower from puissance_din column (format: "150 Ch" → 150.0)
+    print("📊 Parsing horsepower from puissance_din column...")
     df_combined = df_combined.with_columns(
-        pl.col('energie')
+        pl.col('puissance_din')
         .str.replace(' Ch', '')
-        .str.strip()
+        .str.strip_chars()
         .cast(pl.Float64, strict=False)
         .alias('horsepower')
     )
     
     print(f"✅ Loaded {df_combined.height:,} rows with horsepower parsed")
+    print(f"   Note: 'energie' column contains fuel type (kept as-is)")
     print(df_combined.shape)
 
     return df_combined

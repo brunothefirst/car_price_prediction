@@ -150,7 +150,7 @@ class CarPriceFeatureEngineer(BaseEstimator, TransformerMixin):
         add_target_encoding: bool = True,
         add_categorical_features: bool = True,
         add_interaction_features: bool = True,
-        standardize: bool = True,
+        standardize: bool = False,
         brand_onehot: bool = False
     ):
         self.current_year = current_year
@@ -164,10 +164,10 @@ class CarPriceFeatureEngineer(BaseEstimator, TransformerMixin):
         self.brand_onehot = brand_onehot
         
         # Initialize attributes for learned statistics
-        self.brand_price_stats_: Dict[str, Tuple[float, float, float, int]] = {}  # log_price stats
-        self.model_price_stats_: Dict[str, Tuple[float, float, float, int]] = {}
-        self.brand_km_stats_: Dict[str, Tuple[float, float, float, int]] = {}  # km_mean, km_median, age_mean, age_median
-        self.model_km_stats_: Dict[str, Tuple[float, float, int]] = {}
+        self.brand_price_stats_: Dict[str, Tuple[float, float, float, int]] = {}  # (log_price_mean, log_price_median, log_price_std, count)
+        self.model_price_stats_: Dict[str, Tuple[float, float, float, int]] = {}  # (log_price_mean, log_price_median, log_price_std, count)
+        self.brand_km_stats_: Dict[str, Tuple[float, float, float, float, int]] = {}  # (km_mean, km_median, age_mean, age_median, count)
+        self.model_km_stats_: Dict[str, Tuple[float, float, int]] = {}  # (km_mean, age_mean, count)
         self.km_percentiles_: Dict[str, float] = {}
         self.global_mean_: Optional[float] = None
         self.global_median_: Optional[float] = None
@@ -424,6 +424,9 @@ class CarPriceFeatureEngineer(BaseEstimator, TransformerMixin):
             df_pandas = pd.concat([df_pandas.drop(columns=[brand_col]), brand_dummies], axis=1)
             X_df = pl.from_pandas(df_pandas)
             
+            # Create empty brand_counts list for model_popularity_ratio calculation
+            brand_counts = [1] * len(brand_values)  # Use 1 to avoid division issues
+            
         else:
             # Option 2: Create brand aggregate features (default)
             brand_avg_km = []
@@ -433,20 +436,23 @@ class CarPriceFeatureEngineer(BaseEstimator, TransformerMixin):
             brand_mean_log_price = []
             brand_median_log_price = []
             brand_std_log_price = []
+            brand_counts = []
             
             for brand in brand_values:
                 if brand in self.brand_km_stats_:
-                    km_mean, km_median, age_mean, age_median = self.brand_km_stats_[brand]
+                    km_mean, km_median, age_mean, age_median, count = self.brand_km_stats_[brand]
                     brand_avg_km.append(km_mean)
                     brand_median_km.append(km_median)
                     brand_avg_age.append(age_mean)
                     brand_median_age.append(age_median)
+                    brand_counts.append(count)
                 else:
                     # Unseen brand - use global statistics
                     brand_avg_km.append(self.global_km_mean_)
                     brand_median_km.append(self.global_km_mean_)  # Use mean as fallback
                     brand_avg_age.append(self.global_age_mean_)
                     brand_median_age.append(self.global_age_mean_)  # Use mean as fallback
+                    brand_counts.append(1)  # Minimal count for unseen brands
                 
                 # Target encoding (log_price statistics)
                 if self.add_target_encoding:
@@ -681,7 +687,7 @@ class CarPriceFeatureEngineer(BaseEstimator, TransformerMixin):
             age_mean = float(np.mean(brand_age[brand]))
             age_median = float(np.median(brand_age[brand]))
             count = len(brand_km[brand])
-            self.brand_km_stats_[brand] = (km_mean, km_median, age_mean, age_median)
+            self.brand_km_stats_[brand] = (km_mean, km_median, age_mean, age_median, count)
             
             # Price statistics (target encoding) - use log_price
             if y_arr is not None and brand in brand_price:
@@ -780,5 +786,5 @@ class CarPriceFeatureEngineer(BaseEstimator, TransformerMixin):
             f"add_categorical_features={self.add_categorical_features}, "
             f"add_interaction_features={self.add_interaction_features}, "
             f"standardize={self.standardize}, "
-            f"brand_onehot={self.brand_onehot})")
+            f"brand_onehot={self.brand_onehot})"
         )

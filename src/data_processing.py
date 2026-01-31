@@ -169,6 +169,7 @@ class CarDataProcessor:
         ])
         
         # Create simplified DataFrame with renamed columns
+        # Note: puissance_din is dropped after creating horsepower; energie (fuel type) is kept
         df_clean = df.select([
             pl.col('price_numeric').alias('price'),
             pl.col('year_numeric').alias('year'), 
@@ -176,7 +177,7 @@ class CarDataProcessor:
             pl.col('brand_normalized').alias('brand'),
             pl.col('model_normalized').alias('model'),
             pl.col('energie'),
-            pl.col('puissance_din')
+            pl.col('horsepower')
         ]).filter(
             pl.col('price').is_not_null()
         )
@@ -433,7 +434,7 @@ class CarDataProcessor:
             (pl.col('log_price') <= pl.col('upper_bound_log_price')) &
             (pl.col('km') >= pl.col('lower_bound_km')) &
             (pl.col('km') <= pl.col('upper_bound_km'))
-        ).select(['price', 'year', 'km', 'brand', 'model', 'energie', 'puissance_din', 'horsepower'])
+        ).select(['price', 'year', 'km', 'brand', 'model', 'energie', 'horsepower'])
         
         rows_after = df_clean.height
         

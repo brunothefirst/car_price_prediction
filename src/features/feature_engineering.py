@@ -407,12 +407,11 @@ class CarPriceFeatureEngineer(BaseEstimator, TransformerMixin):
             df_pandas = X_df.to_pandas()
             brand_dummies = pd.get_dummies(df_pandas[brand_col], prefix='brand', drop_first=True)
             
-            # Store column names during fit
-            if not self.is_fitted_:
+            # Store column names during first transform (fit_transform or first call after fit)
+            if len(self.brand_columns_) == 0:
                 self.brand_columns_ = brand_dummies.columns.tolist()
-            
-            # During transform, ensure same columns as training
-            if self.is_fitted_:
+            else:
+                # During subsequent transforms, ensure same columns as training
                 # Add missing columns (unseen brands in test set)
                 for col in self.brand_columns_:
                     if col not in brand_dummies.columns:

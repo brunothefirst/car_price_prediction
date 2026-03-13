@@ -392,7 +392,7 @@ class CarPriceFeatureEngineer(BaseEstimator, TransformerMixin):
                 (pl.col('mileage') ** 3).alias('mileage_cubed'),
                 # Legacy features
                 (pl.col(km_col).sqrt()).alias('sqrt_km'),
-                (pl.col('car_age') ** 2).alias('car_age_squared')
+                (pl.col('car_age').sqrt()).alias('sqrt_age')
             ])
         
         # ============================================================
@@ -729,13 +729,14 @@ class CarPriceFeatureEngineer(BaseEstimator, TransformerMixin):
             count = len(model_km[model])
             self.model_km_stats_[model] = (km_mean, age_mean, count)
             
-            # Price statistics (target encoding)
+            # Price statistics (target encoding) - use log prices for consistency with brand
             if y_arr is not None and model in model_price:
                 prices = model_price[model]
                 if len(prices) >= self.min_samples_for_encoding:
-                    price_mean = float(np.mean(prices))
-                    price_median = float(np.median(prices))
-                    price_std = float(np.std(prices)) if len(prices) > 1 else self.global_std_
+                    log_prices = np.log(np.array(prices))
+                    price_mean = float(np.mean(log_prices))
+                    price_median = float(np.median(log_prices))
+                    price_std = float(np.std(log_prices)) if len(log_prices) > 1 else self.global_std_
                     self.model_price_stats_[model] = (price_mean, price_median, price_std, len(prices))
     
     def _to_polars(self, X: Union[pl.DataFrame, np.ndarray]) -> pl.DataFrame:

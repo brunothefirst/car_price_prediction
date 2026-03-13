@@ -176,6 +176,9 @@ class CarPriceFeatureEngineer(BaseEstimator, TransformerMixin):
         self.global_age_mean_: Optional[float] = None
         self.scaler: Optional[StandardScaler] = None
         self.brand_columns_: list = []  # Store brand dummy column names
+        self.brand_quantile_stats_: Dict[str, Tuple[int, int, int]] = {}  # (top25, bottom25, top5)
+        self.model_quantile_stats_: Dict[str, Tuple[int, int, int]] = {}  # (top25, bottom25, top5)
+        self.model_rank_stats_: Dict[Tuple[str, str], int] = {}  # (brand, model) -> rank within brand
         self.is_fitted_: bool = False
     
     def fit(self, X: Union[pl.DataFrame, np.ndarray], y: Union[pl.Series, np.ndarray] = None):
@@ -262,6 +265,10 @@ class CarPriceFeatureEngineer(BaseEstimator, TransformerMixin):
         
         # Compute model-level statistics (including brand for model_popularity_ratio)
         self._compute_model_stats(brands, models, km_values, age_values, y_arr)
+        
+        # Compute quantile/rank features from training data
+        if y_arr is not None:
+            self._compute_quantile_rank_stats(brands, models, y_arr)
         
         self.is_fitted_ = True
         return self
@@ -491,8 +498,9 @@ class CarPriceFeatureEngineer(BaseEstimator, TransformerMixin):
         model_values = X_df[model_col].to_list()
         
         model_counts = []
-        model_avg_price = []
-        model_median_price = []
+        model_mean_log_price = []
+        model_median_log_price = []
+        model_std_log_price = []
         model_popularity_ratio = []
         
         for i, model in enumerate(model_values):
@@ -513,13 +521,15 @@ class CarPriceFeatureEngineer(BaseEstimator, TransformerMixin):
             # Target encoding (price statistics)
             if self.add_target_encoding:
                 if model in self.model_price_stats_:
-                    price_mean, price_median, _, _ = self.model_price_stats_[model]
-                    model_avg_price.append(price_mean)
-                    model_median_price.append(price_median)
+                    price_mean, price_median, price_std, _ = self.model_price_stats_[model]
+                    model_mean_log_price.append(price_mean)
+                    model_median_log_price.append(price_median)
+                    model_std_log_price.append(price_std)
                 else:
                     # Unseen model - use global statistics
-                    model_avg_price.append(self.global_mean_)
-                    model_median_price.append(self.global_median_)
+                    model_mean_log_price.append(self.global_mean_)
+                    model_median_log_price.append(self.global_median_)
+                    model_std_log_price.append(self.global_std_)
         
         X_df = X_df.with_columns([
             pl.Series('model_count', model_counts),
@@ -528,10 +538,56 @@ class CarPriceFeatureEngineer(BaseEstimator, TransformerMixin):
         
         if self.add_target_encoding:
             X_df = X_df.with_columns([
-                pl.Series('model_avg_price', model_avg_price),
-                pl.Series('model_median_price', model_median_price)
+                pl.Series('model_mean_log_price', model_mean_log_price),
+                pl.Series('model_median_log_price', model_median_log_price),
+                pl.Series('model_std_log_price', model_std_log_price)
             ])
-                # Drop model column after features are created
+        
+        # ============================================================
+        # QUANTILE / RANK FEATURES (7)
+        # ============================================================
+        
+        brand_top25_price = []
+        brand_bottom25_price = []
+        brand_top5_price = []
+        model_top25_price = []
+        model_bottom25_price = []
+        model_top5_price = []
+        model_rank_within_brand = []
+        
+        for i, (brand, model) in enumerate(zip(brand_values, model_values)):
+            # Brand quantile flags
+            if brand in self.brand_quantile_stats_:
+                b_top25, b_bottom25, b_top5 = self.brand_quantile_stats_[brand]
+            else:
+                b_top25, b_bottom25, b_top5 = 0, 0, 0
+            brand_top25_price.append(b_top25)
+            brand_bottom25_price.append(b_bottom25)
+            brand_top5_price.append(b_top5)
+            
+            # Model quantile flags
+            if model in self.model_quantile_stats_:
+                m_top25, m_bottom25, m_top5 = self.model_quantile_stats_[model]
+            else:
+                m_top25, m_bottom25, m_top5 = 0, 0, 0
+            model_top25_price.append(m_top25)
+            model_bottom25_price.append(m_bottom25)
+            model_top5_price.append(m_top5)
+            
+            # Model rank within brand (0 for unseen brand/model combos)
+            model_rank_within_brand.append(self.model_rank_stats_.get((brand, model), 0))
+        
+        X_df = X_df.with_columns([
+            pl.Series('brand_top25_price', brand_top25_price, dtype=pl.Int8),
+            pl.Series('brand_bottom25_price', brand_bottom25_price, dtype=pl.Int8),
+            pl.Series('brand_top5_price', brand_top5_price, dtype=pl.Int8),
+            pl.Series('model_top25_price', model_top25_price, dtype=pl.Int8),
+            pl.Series('model_bottom25_price', model_bottom25_price, dtype=pl.Int8),
+            pl.Series('model_top5_price', model_top5_price, dtype=pl.Int8),
+            pl.Series('model_rank_within_brand', model_rank_within_brand, dtype=pl.Int32)
+        ])
+        
+        # Drop model column after features are created
         X_df = X_df.drop(model_col)
                 # ============================================================
         # INTERACTION FEATURES (7)
@@ -633,8 +689,14 @@ class CarPriceFeatureEngineer(BaseEstimator, TransformerMixin):
             features['polynomial_features'] = ['sqrt_km', 'car_age_squared']
         
         if self.add_target_encoding:
-            features['brand_features'].extend(['brand_avg_price', 'brand_median_price', 'brand_price_std'])
-            features['model_features'].extend(['model_avg_price', 'model_median_price'])
+            features['brand_features'].extend(['brand_mean_log_price', 'brand_median_log_price', 'brand_std_log_price'])
+            features['model_features'].extend(['model_mean_log_price', 'model_median_log_price', 'model_std_log_price'])
+        
+        features['quantile_rank_features'] = [
+            'brand_top25_price', 'brand_bottom25_price', 'brand_top5_price',
+            'model_top25_price', 'model_bottom25_price', 'model_top5_price',
+            'model_rank_within_brand'
+        ]
         
         if self.add_interaction_features:
             features['interaction_features'] = [
@@ -699,6 +761,87 @@ class CarPriceFeatureEngineer(BaseEstimator, TransformerMixin):
                     self.brand_price_stats_[brand] = (log_price_mean, log_price_median, log_price_std, len(prices))
                 # Categories with few samples don't get their own encoding
                 # They'll use global mean in transform()
+    
+    def _compute_quantile_rank_stats(
+        self,
+        brands: list,
+        models: list,
+        y_arr: np.ndarray
+    ):
+        """Compute quantile/rank-based features from training data.
+        
+        Computes:
+        - Brand quantile flags: top25, bottom25, top5 based on brand median log price
+        - Model quantile flags: top25, bottom25, top5 based on model median log price
+        - Model rank within brand: dense rank by median log price within each brand
+        """
+        from collections import defaultdict
+        
+        brand_prices = defaultdict(list)
+        model_prices = defaultdict(list)
+        brand_model_prices = defaultdict(list)  # keyed by (brand, model)
+        
+        for i, (brand, model) in enumerate(zip(brands, models)):
+            brand_prices[brand].append(y_arr[i])
+            model_prices[model].append(y_arr[i])
+            brand_model_prices[(brand, model)].append(y_arr[i])
+        
+        # --- Brand quantile flags ---
+        brand_median_log: Dict[str, float] = {}
+        for brand, prices in brand_prices.items():
+            if len(prices) >= self.min_samples_for_encoding:
+                brand_median_log[brand] = float(np.median(np.log(np.array(prices))))
+        
+        if brand_median_log:
+            brand_medians = np.array(list(brand_median_log.values()))
+            q25_b = float(np.quantile(brand_medians, 0.25))
+            q75_b = float(np.quantile(brand_medians, 0.75))
+            q95_b = float(np.quantile(brand_medians, 0.95))
+            self.brand_quantile_stats_ = {
+                brand: (
+                    int(val >= q75_b),  # brand_top25_price
+                    int(val <= q25_b),  # brand_bottom25_price
+                    int(val >= q95_b),  # brand_top5_price
+                )
+                for brand, val in brand_median_log.items()
+            }
+        
+        # --- Model quantile flags ---
+        model_median_log: Dict[str, float] = {}
+        for model, prices in model_prices.items():
+            if len(prices) >= self.min_samples_for_encoding:
+                model_median_log[model] = float(np.median(np.log(np.array(prices))))
+        
+        if model_median_log:
+            model_medians = np.array(list(model_median_log.values()))
+            q25_m = float(np.quantile(model_medians, 0.25))
+            q75_m = float(np.quantile(model_medians, 0.75))
+            q95_m = float(np.quantile(model_medians, 0.95))
+            self.model_quantile_stats_ = {
+                model: (
+                    int(val >= q75_m),  # model_top25_price
+                    int(val <= q25_m),  # model_bottom25_price
+                    int(val >= q95_m),  # model_top5_price
+                )
+                for model, val in model_median_log.items()
+            }
+        
+        # --- Model rank within brand (dense rank, ascending by median log price) ---
+        brand_model_medians: Dict[str, Dict[str, float]] = defaultdict(dict)
+        for (brand, model), prices in brand_model_prices.items():
+            if len(prices) >= self.min_samples_for_encoding:
+                brand_model_medians[brand][model] = float(np.median(np.log(np.array(prices))))
+        
+        self.model_rank_stats_: Dict[Tuple[str, str], int] = {}
+        for brand, model_medians in brand_model_medians.items():
+            sorted_items = sorted(model_medians.items(), key=lambda x: x[1])
+            rank = 1
+            prev_val = None
+            for model, val in sorted_items:
+                if prev_val is not None and val != prev_val:
+                    rank += 1
+                self.model_rank_stats_[(brand, model)] = rank
+                prev_val = val
     
     def _compute_model_stats(
         self, 

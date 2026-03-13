@@ -152,7 +152,8 @@ class CarPriceFeatureEngineer(BaseEstimator, TransformerMixin):
         add_interaction_features: bool = True,
         add_quantile_features: bool = True,
         standardize: bool = False,
-        brand_onehot: bool = False
+        brand_onehot: bool = False,
+        model_onehot: bool = False
     ):
         self.current_year = current_year
         self.min_samples_for_encoding = min_samples_for_encoding
@@ -164,6 +165,7 @@ class CarPriceFeatureEngineer(BaseEstimator, TransformerMixin):
         self.add_quantile_features = add_quantile_features
         self.standardize = standardize
         self.brand_onehot = brand_onehot
+        self.model_onehot = model_onehot
         
         # Initialize attributes for learned statistics
         self.brand_price_stats_: Dict[str, Tuple[float, float, float, int]] = {}  # (log_price_mean, log_price_median, log_price_std, count)
@@ -178,6 +180,7 @@ class CarPriceFeatureEngineer(BaseEstimator, TransformerMixin):
         self.global_age_mean_: Optional[float] = None
         self.scaler: Optional[StandardScaler] = None
         self.brand_columns_: list = []  # Store brand dummy column names
+        self.model_columns_: list = []  # Store model dummy column names
         self.brand_quantile_stats_: Dict[str, Tuple[int, int, int]] = {}  # (top25, bottom25, top5)
         self.model_quantile_stats_: Dict[str, Tuple[int, int, int]] = {}  # (top25, bottom25, top5)
         self.model_rank_stats_: Dict[Tuple[str, str], int] = {}  # (brand, model) -> rank within brand
@@ -550,7 +553,25 @@ class CarPriceFeatureEngineer(BaseEstimator, TransformerMixin):
             ])
         
         # ============================================================
-        # QUANTILE / RANK FEATURES (7)
+        # MODEL ONE-HOT ENCODING (optional)
+        # ============================================================
+        
+        if self.model_onehot:
+            df_pandas = X_df.to_pandas()
+            model_dummies = pd.get_dummies(df_pandas[model_col], prefix='model', drop_first=True)
+            
+            if len(self.model_columns_) == 0:
+                self.model_columns_ = model_dummies.columns.tolist()
+            else:
+                for col in self.model_columns_:
+                    if col not in model_dummies.columns:
+                        model_dummies[col] = 0
+                model_dummies = model_dummies[self.model_columns_]
+            
+            df_pandas = pd.concat([df_pandas.drop(columns=[model_col]), model_dummies], axis=1)
+            X_df = pl.from_pandas(df_pandas)
+        else:
+            X_df = X_df.drop(model_col)
         # ============================================================
         
         brand_top25_price = []
@@ -637,9 +658,28 @@ class CarPriceFeatureEngineer(BaseEstimator, TransformerMixin):
                 pl.Series('model_iqr_log_price', model_iqr_lp, dtype=pl.Float64),
             ])
         
-        # Drop model column after features are created
-        X_df = X_df.drop(model_col)
-                # ============================================================
+        # ============================================================
+        # MODEL ONE-HOT ENCODING (optional, replaces model column drop)
+        # ============================================================
+        
+        if self.model_onehot:
+            df_pandas = X_df.to_pandas()
+            model_dummies = pd.get_dummies(df_pandas[model_col], prefix='model', drop_first=True)
+            
+            if len(self.model_columns_) == 0:
+                self.model_columns_ = model_dummies.columns.tolist()
+            else:
+                for col in self.model_columns_:
+                    if col not in model_dummies.columns:
+                        model_dummies[col] = 0
+                model_dummies = model_dummies[self.model_columns_]
+            
+            df_pandas = pd.concat([df_pandas.drop(columns=[model_col]), model_dummies], axis=1)
+            X_df = pl.from_pandas(df_pandas)
+        else:
+            X_df = X_df.drop(model_col)
+        
+        # ============================================================
         # INTERACTION FEATURES (7)
         # ============================================================
         
@@ -1032,5 +1072,6 @@ class CarPriceFeatureEngineer(BaseEstimator, TransformerMixin):
             f"add_interaction_features={self.add_interaction_features}, "
             f"add_quantile_features={self.add_quantile_features}, "
             f"standardize={self.standardize}, "
-            f"brand_onehot={self.brand_onehot})"
+            f"brand_onehot={self.brand_onehot}, "
+            f"model_onehot={self.model_onehot})"
         )

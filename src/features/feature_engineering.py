@@ -150,6 +150,7 @@ class CarPriceFeatureEngineer(BaseEstimator, TransformerMixin):
         add_target_encoding: bool = True,
         add_categorical_features: bool = True,
         add_interaction_features: bool = True,
+        add_quantile_features: bool = True,
         standardize: bool = False,
         brand_onehot: bool = False
     ):
@@ -160,6 +161,7 @@ class CarPriceFeatureEngineer(BaseEstimator, TransformerMixin):
         self.add_target_encoding = add_target_encoding
         self.add_categorical_features = add_categorical_features
         self.add_interaction_features = add_interaction_features
+        self.add_quantile_features = add_quantile_features
         self.standardize = standardize
         self.brand_onehot = brand_onehot
         
@@ -179,6 +181,8 @@ class CarPriceFeatureEngineer(BaseEstimator, TransformerMixin):
         self.brand_quantile_stats_: Dict[str, Tuple[int, int, int]] = {}  # (top25, bottom25, top5)
         self.model_quantile_stats_: Dict[str, Tuple[int, int, int]] = {}  # (top25, bottom25, top5)
         self.model_rank_stats_: Dict[Tuple[str, str], int] = {}  # (brand, model) -> rank within brand
+        self.brand_dist_stats_: Dict[str, Tuple[float, float, float, float, float, float]] = {}  # (p25, p50, p75, p90, p95, iqr) in log-price space
+        self.model_dist_stats_: Dict[str, Tuple[float, float, float, float, float, float]] = {}  # (p25, p50, p75, p90, p95, iqr) in log-price space
         self.is_fitted_: bool = False
     
     def fit(self, X: Union[pl.DataFrame, np.ndarray], y: Union[pl.Series, np.ndarray] = None):
@@ -269,6 +273,8 @@ class CarPriceFeatureEngineer(BaseEstimator, TransformerMixin):
         # Compute quantile/rank features from training data
         if y_arr is not None:
             self._compute_quantile_rank_stats(brands, models, y_arr)
+            if self.add_quantile_features:
+                self._compute_distribution_stats(brands, models, y_arr)
         
         self.is_fitted_ = True
         return self
@@ -587,6 +593,50 @@ class CarPriceFeatureEngineer(BaseEstimator, TransformerMixin):
             pl.Series('model_rank_within_brand', model_rank_within_brand, dtype=pl.Int32)
         ])
         
+        # ============================================================
+        # DISTRIBUTION QUANTILE FEATURES (8) — continuous, log-price space
+        # ============================================================
+        
+        if self.add_quantile_features:
+            brand_p25_lp, brand_p75_lp, brand_p90_lp, brand_iqr_lp = [], [], [], []
+            model_p25_lp, model_p75_lp, model_p90_lp, model_iqr_lp = [], [], [], []
+            
+            # Fallback approximation for unseen brands/models (normal distribution assumption)
+            global_p25 = self.global_mean_ - 0.674 * self.global_std_
+            global_p75 = self.global_mean_ + 0.674 * self.global_std_
+            global_p90 = self.global_mean_ + 1.282 * self.global_std_
+            global_iqr = 1.349 * self.global_std_
+            
+            for brand, model in zip(brand_values, model_values):
+                if brand in self.brand_dist_stats_:
+                    p25, _, p75, p90, _, iqr = self.brand_dist_stats_[brand]
+                else:
+                    p25, p75, p90, iqr = global_p25, global_p75, global_p90, global_iqr
+                brand_p25_lp.append(p25)
+                brand_p75_lp.append(p75)
+                brand_p90_lp.append(p90)
+                brand_iqr_lp.append(iqr)
+                
+                if model in self.model_dist_stats_:
+                    p25, _, p75, p90, _, iqr = self.model_dist_stats_[model]
+                else:
+                    p25, p75, p90, iqr = global_p25, global_p75, global_p90, global_iqr
+                model_p25_lp.append(p25)
+                model_p75_lp.append(p75)
+                model_p90_lp.append(p90)
+                model_iqr_lp.append(iqr)
+            
+            X_df = X_df.with_columns([
+                pl.Series('brand_p25_log_price', brand_p25_lp, dtype=pl.Float64),
+                pl.Series('brand_p75_log_price', brand_p75_lp, dtype=pl.Float64),
+                pl.Series('brand_p90_log_price', brand_p90_lp, dtype=pl.Float64),
+                pl.Series('brand_iqr_log_price', brand_iqr_lp, dtype=pl.Float64),
+                pl.Series('model_p25_log_price', model_p25_lp, dtype=pl.Float64),
+                pl.Series('model_p75_log_price', model_p75_lp, dtype=pl.Float64),
+                pl.Series('model_p90_log_price', model_p90_lp, dtype=pl.Float64),
+                pl.Series('model_iqr_log_price', model_iqr_lp, dtype=pl.Float64),
+            ])
+        
         # Drop model column after features are created
         X_df = X_df.drop(model_col)
                 # ============================================================
@@ -697,6 +747,14 @@ class CarPriceFeatureEngineer(BaseEstimator, TransformerMixin):
             'model_top25_price', 'model_bottom25_price', 'model_top5_price',
             'model_rank_within_brand'
         ]
+        
+        if self.add_quantile_features:
+            features['distribution_quantile_features'] = [
+                'brand_p25_log_price', 'brand_p75_log_price',
+                'brand_p90_log_price', 'brand_iqr_log_price',
+                'model_p25_log_price', 'model_p75_log_price',
+                'model_p90_log_price', 'model_iqr_log_price',
+            ]
         
         if self.add_interaction_features:
             features['interaction_features'] = [
@@ -843,6 +901,50 @@ class CarPriceFeatureEngineer(BaseEstimator, TransformerMixin):
                 self.model_rank_stats_[(brand, model)] = rank
                 prev_val = val
     
+    def _compute_distribution_stats(
+        self,
+        brands: list,
+        models: list,
+        y_arr: np.ndarray
+    ):
+        """
+        Compute within-entity price distribution statistics in log-price space.
+        
+        Stores (p25, p50, p75, p90, p95, iqr) per brand and per model.
+        All percentiles are computed on log(price) for consistency with the training target.
+        Entities below min_samples_for_encoding fall back to global stats at transform time.
+        """
+        from collections import defaultdict
+        
+        brand_prices: Dict[str, list] = defaultdict(list)
+        model_prices: Dict[str, list] = defaultdict(list)
+        
+        for i, (brand, model) in enumerate(zip(brands, models)):
+            brand_prices[brand].append(y_arr[i])
+            model_prices[model].append(y_arr[i])
+        
+        for brand, prices in brand_prices.items():
+            if len(prices) >= self.min_samples_for_encoding:
+                lp = np.log(np.array(prices))
+                p25 = float(np.percentile(lp, 25))
+                p50 = float(np.percentile(lp, 50))
+                p75 = float(np.percentile(lp, 75))
+                p90 = float(np.percentile(lp, 90))
+                p95 = float(np.percentile(lp, 95))
+                iqr = p75 - p25
+                self.brand_dist_stats_[brand] = (p25, p50, p75, p90, p95, iqr)
+        
+        for model, prices in model_prices.items():
+            if len(prices) >= self.min_samples_for_encoding:
+                lp = np.log(np.array(prices))
+                p25 = float(np.percentile(lp, 25))
+                p50 = float(np.percentile(lp, 50))
+                p75 = float(np.percentile(lp, 75))
+                p90 = float(np.percentile(lp, 90))
+                p95 = float(np.percentile(lp, 95))
+                iqr = p75 - p25
+                self.model_dist_stats_[model] = (p25, p50, p75, p90, p95, iqr)
+    
     def _compute_model_stats(
         self, 
         brands: list,
@@ -928,6 +1030,7 @@ class CarPriceFeatureEngineer(BaseEstimator, TransformerMixin):
             f"add_target_encoding={self.add_target_encoding}, "
             f"add_categorical_features={self.add_categorical_features}, "
             f"add_interaction_features={self.add_interaction_features}, "
+            f"add_quantile_features={self.add_quantile_features}, "
             f"standardize={self.standardize}, "
             f"brand_onehot={self.brand_onehot})"
         )

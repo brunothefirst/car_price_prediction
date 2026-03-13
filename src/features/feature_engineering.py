@@ -659,27 +659,6 @@ class CarPriceFeatureEngineer(BaseEstimator, TransformerMixin):
             ])
         
         # ============================================================
-        # MODEL ONE-HOT ENCODING (optional, replaces model column drop)
-        # ============================================================
-        
-        if self.model_onehot:
-            df_pandas = X_df.to_pandas()
-            model_dummies = pd.get_dummies(df_pandas[model_col], prefix='model', drop_first=True)
-            
-            if len(self.model_columns_) == 0:
-                self.model_columns_ = model_dummies.columns.tolist()
-            else:
-                for col in self.model_columns_:
-                    if col not in model_dummies.columns:
-                        model_dummies[col] = 0
-                model_dummies = model_dummies[self.model_columns_]
-            
-            df_pandas = pd.concat([df_pandas.drop(columns=[model_col]), model_dummies], axis=1)
-            X_df = pl.from_pandas(df_pandas)
-        else:
-            X_df = X_df.drop(model_col)
-        
-        # ============================================================
         # INTERACTION FEATURES (7)
         # ============================================================
         

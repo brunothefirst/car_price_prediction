@@ -9,3 +9,4 @@ xgboost
 lightgbm
 jupyter
 shap
+python-pptx

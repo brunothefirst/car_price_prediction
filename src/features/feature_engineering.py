@@ -153,7 +153,9 @@ class CarPriceFeatureEngineer(BaseEstimator, TransformerMixin):
         add_quantile_features: bool = True,
         standardize: bool = False,
         brand_onehot: bool = False,
-        model_onehot: bool = False
+        model_onehot: bool = False,
+        add_horsepower_features: bool = False,
+        add_energie_ohe: bool = False
     ):
         self.current_year = current_year
         self.min_samples_for_encoding = min_samples_for_encoding
@@ -166,6 +168,8 @@ class CarPriceFeatureEngineer(BaseEstimator, TransformerMixin):
         self.standardize = standardize
         self.brand_onehot = brand_onehot
         self.model_onehot = model_onehot
+        self.add_horsepower_features = add_horsepower_features
+        self.add_energie_ohe = add_energie_ohe
         
         # Initialize attributes for learned statistics
         self.brand_price_stats_: Dict[str, Tuple[float, float, float, int]] = {}  # (log_price_mean, log_price_median, log_price_std, count)
@@ -186,6 +190,7 @@ class CarPriceFeatureEngineer(BaseEstimator, TransformerMixin):
         self.model_rank_stats_: Dict[Tuple[str, str], int] = {}  # (brand, model) -> rank within brand
         self.brand_dist_stats_: Dict[str, Tuple[float, float, float, float, float, float]] = {}  # (p25, p50, p75, p90, p95, iqr) in log-price space
         self.model_dist_stats_: Dict[str, Tuple[float, float, float, float, float, float]] = {}  # (p25, p50, p75, p90, p95, iqr) in log-price space
+        self.energie_columns_: list = []  # Store energie OHE column names from training
         self.is_fitted_: bool = False
     
     def fit(self, X: Union[pl.DataFrame, np.ndarray], y: Union[pl.Series, np.ndarray] = None):
@@ -683,6 +688,50 @@ class CarPriceFeatureEngineer(BaseEstimator, TransformerMixin):
             ])
         
         # ============================================================
+        # HORSEPOWER FEATURES (optional)
+        # ============================================================
+        # Requires column 'horsepower' to be present in the DataFrame.
+        # Adds raw hp + polynomial (hp², hp³) and root (√hp) transforms.
+        # These follow the same style as the existing age/km polynomial features.
+        
+        if self.add_horsepower_features and 'horsepower' in X_df.columns:
+            X_df = X_df.with_columns([
+                pl.col('horsepower').cast(pl.Float64).alias('hp'),
+            ])
+            X_df = X_df.with_columns([
+                (pl.col('hp') ** 2).alias('hp_squared'),
+                (pl.col('hp') ** 3).alias('hp_cubed'),
+                pl.col('hp').sqrt().alias('sqrt_hp'),
+            ])
+        
+        # ============================================================
+        # ENERGIE (FUEL TYPE) ONE-HOT ENCODING (optional)
+        # ============================================================
+        # Requires column 'energie' to be present in the DataFrame.
+        # Applies get_dummies on training categories; aligns test set to
+        # the same column set learned during fit() to prevent schema drift.
+        
+        if self.add_energie_ohe and 'energie' in X_df.columns:
+            df_pandas = X_df.to_pandas()
+            energie_dummies = pd.get_dummies(df_pandas['energie'], prefix='energie', drop_first=True)
+            energie_dummies = energie_dummies.astype(int)
+            
+            if len(self.energie_columns_) == 0:
+                # First call (fit or fit_transform): store training column names
+                self.energie_columns_ = energie_dummies.columns.tolist()
+            else:
+                # Subsequent calls (transform): align to training columns
+                for col in self.energie_columns_:
+                    if col not in energie_dummies.columns:
+                        energie_dummies[col] = 0
+                energie_dummies = energie_dummies[self.energie_columns_]
+            
+            df_pandas = pd.concat(
+                [df_pandas.drop(columns=['energie']), energie_dummies], axis=1
+            )
+            X_df = pl.from_pandas(df_pandas)
+        
+        # ============================================================
         # Z-SCORE STANDARDIZATION (optional, applied last)
         # ============================================================
         
@@ -1052,5 +1101,7 @@ class CarPriceFeatureEngineer(BaseEstimator, TransformerMixin):
             f"add_quantile_features={self.add_quantile_features}, "
             f"standardize={self.standardize}, "
             f"brand_onehot={self.brand_onehot}, "
-            f"model_onehot={self.model_onehot})"
+            f"model_onehot={self.model_onehot}, "
+            f"add_horsepower_features={self.add_horsepower_features}, "
+            f"add_energie_ohe={self.add_energie_ohe})"
         )

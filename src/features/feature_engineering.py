@@ -426,7 +426,7 @@ class CarPriceFeatureEngineer(BaseEstimator, TransformerMixin):
             # Option 1: One-hot encode brand (skip aggregates)
             # Convert to pandas for get_dummies, then back to polars
             df_pandas = X_df.to_pandas()
-            brand_dummies = pd.get_dummies(df_pandas[brand_col], prefix='brand', drop_first=True)
+            brand_dummies = pd.get_dummies(df_pandas[brand_col], prefix='ohe_brand', drop_first=True)
             
             # Store column names during first transform (fit_transform or first call after fit)
             if len(self.brand_columns_) == 0:
@@ -563,7 +563,7 @@ class CarPriceFeatureEngineer(BaseEstimator, TransformerMixin):
         
         if self.model_onehot:
             df_pandas = X_df.to_pandas()
-            model_dummies = pd.get_dummies(df_pandas[model_col], prefix='model', drop_first=True)
+            model_dummies = pd.get_dummies(df_pandas[model_col], prefix='ohe_model', drop_first=True)
             
             if len(self.model_columns_) == 0:
                 self.model_columns_ = model_dummies.columns.tolist()

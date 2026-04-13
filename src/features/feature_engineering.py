@@ -694,7 +694,7 @@ class CarPriceFeatureEngineer(BaseEstimator, TransformerMixin):
         # Adds raw hp + polynomial (hp², hp³) and root (√hp) transforms.
         # These follow the same style as the existing age/km polynomial features.
         
-        if self.add_horsepower_features and 'horsepower' in X_df.columns:
+        if getattr(self, 'add_horsepower_features', False) and 'horsepower' in X_df.columns:
             X_df = X_df.with_columns([
                 pl.col('horsepower').cast(pl.Float64).alias('hp'),
             ])
@@ -711,7 +711,7 @@ class CarPriceFeatureEngineer(BaseEstimator, TransformerMixin):
         # Applies get_dummies on training categories; aligns test set to
         # the same column set learned during fit() to prevent schema drift.
         
-        if self.add_energie_ohe and 'energie' in X_df.columns:
+        if getattr(self, 'add_energie_ohe', False) and 'energie' in X_df.columns:
             df_pandas = X_df.to_pandas()
             energie_dummies = pd.get_dummies(df_pandas['energie'], prefix='energie', drop_first=True)
             energie_dummies = energie_dummies.astype(int)

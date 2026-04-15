@@ -170,11 +170,8 @@ async def fetch_page_data(page, url: str) -> dict | None:
 
 # ── Per-combination scraper ───────────────────────────────────────────────────
 
-async def scrape_combination(
-    browser, brand: str, model: str, year: int
-) -> list[dict]:
-    """Return a deduplicated list of listing dicts for one combination."""
-    context = await browser.new_context(
+def _new_context_kwargs() -> dict:
+    return dict(
         user_agent=(
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
             "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -183,64 +180,77 @@ async def scrape_combination(
         locale="es-ES",
         viewport={"width": 1280, "height": 900},
     )
-    page = await context.new_page()
 
+
+async def fetch_page_fresh(browser, url: str) -> dict | None:
+    """Fetch a single listing page in a brand-new browser context (fresh cookies)."""
+    context = await browser.new_context(**_new_context_kwargs())
+    try:
+        page = await context.new_page()
+        return await fetch_page_data(page, url)
+    finally:
+        try:
+            await context.close()
+        except Exception:
+            pass
+
+
+async def scrape_combination(
+    browser, brand: str, model: str, year: int
+) -> list[dict]:
+    """Return a deduplicated list of listing dicts for one combination."""
     all_items: list[dict] = []
     seen_ids: set[str] = set()
 
-    try:
-        # ── Page 1 (with retries) ────────────────────────────────────────────
-        url_p1 = build_url(brand, model, year, 1)
-        data = None
+    # ── Page 1 (with retries) ────────────────────────────────────────────
+    url_p1 = build_url(brand, model, year, 1)
+    data = None
+    for attempt in range(1, MAX_RETRIES + 1):
+        log(f"  → page 1 (attempt {attempt}): {url_p1}")
+        data = await fetch_page_fresh(browser, url_p1)
+        if data and data.get("items"):
+            break
+        if attempt < MAX_RETRIES:
+            log(f"  ⏳ No data — rate-limited? Waiting {RATE_LIMIT_WAIT}s …")
+            await asyncio.sleep(RATE_LIMIT_WAIT)
+
+    if not data or not data.get("items"):
+        log(f"  ✗ No listings found for {brand}/{model}/{year}")
+        return []
+
+    total_results = data["totalResults"]
+    total_pages   = data["totalPages"]
+    log(f"  ✓ {total_results} listings across {total_pages} page(s)")
+
+    for item in data["items"]:
+        if item["id"] not in seen_ids:
+            seen_ids.add(item["id"])
+            all_items.append(item)
+
+    # ── Remaining pages ──────────────────────────────────────────────────
+    for p in range(2, total_pages + 1):
+        delay = random.uniform(MIN_DELAY, MAX_DELAY)
+        log(f"  ⏳ Waiting {delay:.1f}s …")
+        await asyncio.sleep(delay)
+
+        url_pn = build_url(brand, model, year, p)
+        page_data = None
         for attempt in range(1, MAX_RETRIES + 1):
-            log(f"  → page 1 (attempt {attempt}): {url_p1}")
-            data = await fetch_page_data(page, url_p1)
-            if data and data.get("items"):
+            log(f"  → page {p} (attempt {attempt}): {url_pn}")
+            page_data = await fetch_page_fresh(browser, url_pn)
+            if page_data and page_data.get("items"):
                 break
             if attempt < MAX_RETRIES:
-                log(f"  ⏳ No data — rate-limited? Waiting {RATE_LIMIT_WAIT}s …")
+                log(f"  ⏳ Rate-limited on page {p} — waiting {RATE_LIMIT_WAIT}s …")
                 await asyncio.sleep(RATE_LIMIT_WAIT)
 
-        if not data or not data.get("items"):
-            log(f"  ✗ No listings found for {brand}/{model}/{year}")
-            return []
-
-        total_results = data["totalResults"]
-        total_pages   = data["totalPages"]
-        log(f"  ✓ {total_results} listings across {total_pages} page(s)")
-
-        for item in data["items"]:
-            if item["id"] not in seen_ids:
-                seen_ids.add(item["id"])
-                all_items.append(item)
-
-        # ── Remaining pages ──────────────────────────────────────────────────
-        for p in range(2, total_pages + 1):
-            delay = random.uniform(MIN_DELAY, MAX_DELAY)
-            log(f"  ⏳ Waiting {delay:.1f}s …")
-            await asyncio.sleep(delay)
-
-            url_pn = build_url(brand, model, year, p)
-            page_data = None
-            for attempt in range(1, MAX_RETRIES + 1):
-                log(f"  → page {p} (attempt {attempt}): {url_pn}")
-                page_data = await fetch_page_data(page, url_pn)
-                if page_data and page_data.get("items"):
-                    break
-                if attempt < MAX_RETRIES:
-                    log(f"  ⏳ Rate-limited on page {p} — waiting {RATE_LIMIT_WAIT}s …")
-                    await asyncio.sleep(RATE_LIMIT_WAIT)
-
-            if page_data and page_data.get("items"):
-                for item in page_data["items"]:
-                    if item["id"] not in seen_ids:
-                        seen_ids.add(item["id"])
-                        all_items.append(item)
-            else:
-                log(f"  ⚠ Could not retrieve page {p}, continuing …")
-
-    finally:
-        await context.close()
+        if page_data and page_data.get("items"):
+            for item in page_data["items"]:
+                if item["id"] not in seen_ids:
+                    seen_ids.add(item["id"])
+                    all_items.append(item)
+        else:
+            log(f"  ⚠ Could not retrieve page {p}, continuing …")
 
     return all_items
 
@@ -284,6 +294,19 @@ async def main() -> None:
     async with async_playwright() as pw:
         browser = await pw.chromium.launch(headless=HEADLESS)
 
+        async def ensure_browser():
+            nonlocal browser
+            try:
+                # Probe the browser with a cheap call
+                await browser.contexts()
+            except Exception:
+                log("  ⚠ Browser died — relaunching …")
+                try:
+                    await browser.close()
+                except Exception:
+                    pass
+                browser = await pw.chromium.launch(headless=HEADLESS)
+
         try:
             for i, (brand, model, year) in enumerate(combinations, 1):
                 key = combo_key(brand, model, year)
@@ -292,6 +315,7 @@ async def main() -> None:
                     log(f"[{i}/{total}] ✓ skip  {brand} / {model} / {year}")
                     continue
 
+                await ensure_browser()
                 log(f"[{i}/{total}] ▶ {brand} / {model} / {year}")
 
                 try:
@@ -322,7 +346,10 @@ async def main() -> None:
                     await asyncio.sleep(delay)
 
         finally:
-            await browser.close()
+            try:
+                await browser.close()
+            except Exception:
+                pass
 
     # ── Summary ──────────────────────────────────────────────────────────────
     done   = sum(1 for v in progress.values() if v.get("done"))

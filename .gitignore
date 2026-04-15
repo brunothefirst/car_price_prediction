@@ -118,3 +118,4 @@ dmypy.json
 
 mlruns/
 output/
+scrapper/combinations.csv

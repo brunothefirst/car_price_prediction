@@ -1,12 +1,12 @@
 """
-coches.net Playwright scraper
-------------------------------
+coches.net stealth scraper
+--------------------------
 Scrapes car listings from coches.net for each brand/model/year
 combination listed in combinations.csv.
 
 Setup:
     pip install -r requirements.txt
-    playwright install chromium
+    patchright install chromium
     cp .env.example .env   # then edit OUTPUT_DIR
 
 Run:
@@ -17,13 +17,19 @@ Resume after interruption:
     and already-written CSVs are kept.
 
 Anti-bot notes:
-    coches.net runs a JavaScript challenge (DataDome/similar) that sets a
-    session cookie after verifying the browser is real. The scraper therefore:
+    coches.net is protected by a DataDome-style JavaScript challenge that
+    fingerprints the browser and scores every request. To avoid detection
+    the scraper:
+      - Uses **patchright** (a Playwright fork with built-in stealth patches
+        that hide navigator.webdriver, fix the WebGL vendor, restore
+        chrome.runtime, etc.) instead of vanilla playwright.
+      - Layers **playwright-stealth** on top to patch any remaining signals.
+      - Defaults to HEADED mode (HEADLESS=false). Headless Chromium has
+        additional fingerprintable tells; on a server, run inside Xvfb.
       - Uses ONE browser context per combination so the challenge cookie
-        persists across page 1 → 2 → 3 etc.
-      - Navigates to subsequent pages by CLICKING the "next page" link rather
-        than jumping directly to the paginated URL (avoids triggering
-        re-verification and looks more human).
+        set on page 1 persists across all subsequent pages.
+      - Navigates to subsequent pages by CLICKING the "next page" link
+        rather than jumping directly to the paginated URL.
       - Uses generous, randomised delays between pages and combinations.
 """
 
@@ -38,7 +44,11 @@ from datetime import datetime
 from pathlib import Path
 
 from dotenv import load_dotenv
-from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeoutError
+# patchright is a drop-in replacement for playwright with built-in stealth
+# patches (hides navigator.webdriver, fixes WebGL vendor, restores chrome.runtime,
+# disables CDP detection, etc.). Its API is identical to playwright.async_api.
+from patchright.async_api import async_playwright, TimeoutError as PlaywrightTimeoutError
+from playwright_stealth import Stealth
 
 load_dotenv()
 
@@ -52,7 +62,11 @@ COMBO_DELAY_MIN   = float(os.getenv("COMBO_DELAY_MIN",  "12.0"))  # seconds betw
 COMBO_DELAY_MAX   = float(os.getenv("COMBO_DELAY_MAX",  "20.0"))
 RATE_LIMIT_WAIT   = float(os.getenv("RATE_LIMIT_WAIT",  "90.0"))  # wait when blocked
 MAX_RETRIES       = int(os.getenv("MAX_RETRIES",        "3"))
-HEADLESS          = os.getenv("HEADLESS", "true").lower() == "true"
+HEADLESS          = os.getenv("HEADLESS", "false").lower() == "true"
+
+# Single Stealth instance reused across all contexts. It applies the
+# evasions via init scripts, so creating it once is enough.
+_STEALTH = Stealth()
 
 # ── URL slug mappings ─────────────────────────────────────────────────────────
 BRAND_MAP = {
@@ -171,48 +185,43 @@ async def extract_page_data(page) -> dict | None:
         return None
 
 
-async def simulate_human_scroll(page) -> None:
-    """Scroll down the page a little to mimic a real user reading results."""
-    try:
-        await page.evaluate("window.scrollBy(0, Math.floor(Math.random() * 400) + 200)")
-        await page.wait_for_timeout(random.randint(400, 900))
-        await page.evaluate("window.scrollBy(0, Math.floor(Math.random() * 300) + 100)")
-        await page.wait_for_timeout(random.randint(300, 700))
-    except Exception:
-        pass
-
-
 async def click_next_page(page) -> bool:
     """
-    Click the 'next page' pagination link.
-    Returns True if the click succeeded and the page navigated, False otherwise.
+    Click the confirmed 'next page' link on coches.net.
+
+    The site uses a single <a aria-label="Página siguiente"> anchor. Clicking
+    it navigates to the ID-based URL format the site uses internally:
+      /segunda-mano/?MakeIds[0]=X&ModelIds[0]=Y&...&pg=N
+    That is intentional — we let the site handle its own URL routing rather
+    than constructing paginated URLs ourselves.
+
+    Returns True if the click succeeded and the page navigated.
     """
-    # Selectors to try for the next-page control (ordered by specificity)
-    selectors = [
-        "a[rel='next']",
-        "a[aria-label*='siguiente' i]",
-        "a[aria-label*='next' i]",
-        ".pagination__next a",
-        ".pagination a[data-page]:last-of-type",
-        "li.next a",
-        "a.next",
-    ]
-    for sel in selectors:
-        try:
-            el = await page.query_selector(sel)
-            if el and await el.is_visible():
-                old_url = page.url
-                await el.click()
-                # Wait for URL to change (navigation happened)
-                await page.wait_for_function(
-                    f"() => location.href !== {json.dumps(old_url)}",
-                    timeout=10_000
-                )
-                await page.wait_for_load_state("domcontentloaded", timeout=20_000)
-                return True
-        except Exception:
-            continue
-    return False
+    sel = 'a[aria-label="Página siguiente"]'
+    try:
+        el = await page.query_selector(sel)
+        if el is None:
+            log("  ⚠  Next-page link not found in DOM")
+            return False
+        if not await el.is_visible():
+            log("  ⚠  Next-page link is not visible")
+            return False
+        disabled = await el.get_attribute("aria-disabled")
+        if disabled == "true":
+            log("  ⚠  Next-page link is disabled (already on last page?)")
+            return False
+
+        old_url = page.url
+        await el.click()
+        await page.wait_for_function(
+            f"() => location.href !== {json.dumps(old_url)}",
+            timeout=10_000,
+        )
+        await page.wait_for_load_state("domcontentloaded", timeout=20_000)
+        return True
+    except Exception as e:
+        log(f"  ⚠  click_next_page error: {e}")
+        return False
 
 
 # ── Per-combination scraper ───────────────────────────────────────────────────
@@ -235,6 +244,10 @@ async def scrape_combination(
         locale="es-ES",
         viewport={"width": 1280, "height": 900},
     )
+    # Layer playwright-stealth on top of patchright's built-in patches.
+    # This injects init scripts that further mask automation signals
+    # (navigator.permissions, plugins, languages, sec-ch-ua, etc.).
+    await _STEALTH.apply_stealth_async(context)
     page = await context.new_page()
 
     all_items: list[dict] = []
@@ -274,10 +287,8 @@ async def scrape_combination(
                 seen_ids.add(item["id"])
                 all_items.append(item)
 
-        # ── Pages 2+ — navigate by clicking "next page" ──────────────────────
+        # ── Pages 2+ — navigate by clicking "Página siguiente" ──────────────
         for p in range(2, total_pages + 1):
-            # Simulate a human reading the current page before going to the next
-            await simulate_human_scroll(page)
             delay = random.uniform(MIN_DELAY, MAX_DELAY)
             log(f"  ⏳ Waiting {delay:.1f}s …")
             await asyncio.sleep(delay)
@@ -286,16 +297,20 @@ async def scrape_combination(
             for attempt in range(1, MAX_RETRIES + 1):
                 log(f"  → page {p} (attempt {attempt})")
 
-                clicked = await click_next_page(page)
-
-                if not clicked:
-                    # Fallback: direct URL navigation (less ideal, but a safety net)
-                    log(f"  ⚠  Could not find next-page link — falling back to direct URL")
-                    url_pn = build_url(brand, model, year, p)
+                if attempt == 1:
+                    # First attempt: click the next-page link from wherever we are.
+                    # The site transitions to its internal ID-based URL automatically.
+                    clicked = await click_next_page(page)
+                    if not clicked:
+                        log(f"  ⚠  Next-page click failed on page {p}, skipping")
+                        break
+                else:
+                    # Retry: we're already on the correct URL, just reload it.
+                    log(f"  ↺  Reloading page {p} …")
                     try:
-                        await page.goto(url_pn, wait_until="domcontentloaded", timeout=30_000)
+                        await page.reload(wait_until="domcontentloaded", timeout=30_000)
                     except PlaywrightTimeoutError:
-                        log(f"  ⏱  Timeout loading page {p}")
+                        log(f"  ⏱  Timeout reloading page {p}")
                         if attempt < MAX_RETRIES:
                             await asyncio.sleep(RATE_LIMIT_WAIT)
                         continue
@@ -304,13 +319,8 @@ async def scrape_combination(
                 if page_data and page_data.get("items"):
                     break
                 if attempt < MAX_RETRIES:
-                    log(f"  ⏳ Rate-limited on page {p} — waiting {RATE_LIMIT_WAIT}s …")
+                    log(f"  ⏳ No data on page {p} — waiting {RATE_LIMIT_WAIT}s …")
                     await asyncio.sleep(RATE_LIMIT_WAIT)
-                    # Reload current URL to get a fresh challenge pass
-                    try:
-                        await page.reload(wait_until="domcontentloaded", timeout=30_000)
-                    except Exception:
-                        pass
 
             if page_data and page_data.get("items"):
                 for item in page_data["items"]:

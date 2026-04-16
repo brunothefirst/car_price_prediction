@@ -1,0 +1,102 @@
+{
+  "kia|stonic|2021": {
+    "done": false,
+    "error": "BrowserContext.close: Target page, context or browser has been closed",
+    "timestamp": "2026-04-16T10:00:30.309843"
+  },
+  "kia|sportage|2018": {
+    "done": false,
+    "error": "Browser.new_context: Connection closed while reading from the driver",
+    "timestamp": "2026-04-16T09:06:40.982727"
+  },
+  "toyota|rav4|2018": {
+    "done": false,
+    "error": "Browser.new_context: Connection closed while reading from the driver",
+    "timestamp": "2026-04-16T09:06:58.968878"
+  },
+  "ford|focus|2018": {
+    "done": false,
+    "error": "Browser.new_context: Connection closed while reading from the driver",
+    "timestamp": "2026-04-16T09:07:09.211010"
+  },
+  "hyundai|tucson|2020": {
+    "done": false,
+    "error": "Browser.new_context: Connection closed while reading from the driver",
+    "timestamp": "2026-04-16T09:07:25.444468"
+  },
+  "citroen|c5 aircross|2019": {
+    "done": false,
+    "error": "Browser.new_context: Connection closed while reading from the driver",
+    "timestamp": "2026-04-15T23:04:38.553789"
+  },
+  "kia|sportage|2019": {
+    "done": false,
+    "error": "Browser.new_context: Connection closed while reading from the driver",
+    "timestamp": "2026-04-15T23:04:52.051307"
+  },
+  "toyota|rav4|2020": {
+    "done": false,
+    "error": "Browser.new_context: Connection closed while reading from the driver",
+    "timestamp": "2026-04-15T23:05:08.176982"
+  },
+  "toyota|land cruiser|2023": {
+    "done": false,
+    "error": "Browser.new_context: Connection closed while reading from the driver",
+    "timestamp": "2026-04-15T23:05:21.962408"
+  },
+  "hyundai|tucson|2022": {
+    "done": false,
+    "error": "Browser.new_context: Connection closed while reading from the driver",
+    "timestamp": "2026-04-15T23:05:34.782826"
+  },
+  "kia|rio|2018": {
+    "done": false,
+    "error": "Browser.new_context: Connection closed while reading from the driver",
+    "timestamp": "2026-04-15T23:05:52.158515"
+  },
+  "mercedesbenz|classe glc|2019": {
+    "done": false,
+    "error": "Browser.new_context: Connection closed while reading from the driver",
+    "timestamp": "2026-04-15T23:06:04.010322"
+  },
+  "mercedesbenz|classe glc|2022": {
+    "done": false,
+    "error": "Browser.new_context: Connection closed while reading from the driver",
+    "timestamp": "2026-04-15T23:06:17.121252"
+  },
+  "hyundai|santa fe|2019": {
+    "done": false,
+    "error": "Browser.new_context: Connection closed while reading from the driver",
+    "timestamp": "2026-04-15T23:06:32.720972"
+  },
+  "peugeot|208|2018": {
+    "done": false,
+    "error": "Browser.new_context: Connection closed while reading from the driver",
+    "timestamp": "2026-04-15T23:06:44.849992"
+  },
+  "nissan|xtrail|2018": {
+    "done": false,
+    "error": "Browser.new_context: Connection closed while reading from the driver",
+    "timestamp": "2026-04-15T23:07:01.443362"
+  },
+  "kia|sorento|2020": {
+    "done": false,
+    "error": "Browser.new_context: Connection closed while reading from the driver",
+    "timestamp": "2026-04-15T23:07:13.251318"
+  },
+  "honda|crv|2022": {
+    "done": false,
+    "error": "Browser.new_context: Connection closed while reading from the driver",
+    "timestamp": "2026-04-15T23:07:28.720165"
+  },
+  "toyota|land cruiser|2019": {
+    "done": false,
+    "error": "Browser.new_context: Connection closed while reading from the driver",
+    "timestamp": "2026-04-15T23:07:44.456165"
+  },
+  "hyundai|santa fe|2018": {
+    "done": false,
+    "error": "Browser.new_context: Connection closed while reading from the driver",
+    "timestamp": "2026-04-15T23:08:00.129515"
+  }
+}

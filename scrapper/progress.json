@@ -1,28 +1,33 @@
 {
   "kia|stonic|2021": {
-    "done": false,
-    "error": "BrowserContext.close: Target page, context or browser has been closed",
-    "timestamp": "2026-04-16T10:00:30.309843"
+    "done": true,
+    "rows": 31,
+    "file": "/Users/brunobrumbrum/Documents/data/car_price_prediction/coches_net/kia_stonic_2021.csv",
+    "timestamp": "2026-04-22T18:48:37.630381"
   },
   "kia|sportage|2018": {
-    "done": false,
-    "error": "Browser.new_context: Connection closed while reading from the driver",
-    "timestamp": "2026-04-16T09:06:40.982727"
+    "done": true,
+    "rows": 0,
+    "file": "/Users/brunobrumbrum/Documents/data/car_price_prediction/coches_net/kia_sportage_2018.csv",
+    "timestamp": "2026-04-22T18:49:56.712532"
   },
   "toyota|rav4|2018": {
-    "done": false,
-    "error": "Browser.new_context: Connection closed while reading from the driver",
-    "timestamp": "2026-04-16T09:06:58.968878"
+    "done": true,
+    "rows": 0,
+    "file": "/Users/brunobrumbrum/Documents/data/car_price_prediction/coches_net/toyota_rav4_2018.csv",
+    "timestamp": "2026-04-22T18:51:13.877973"
   },
   "ford|focus|2018": {
-    "done": false,
-    "error": "Browser.new_context: Connection closed while reading from the driver",
-    "timestamp": "2026-04-16T09:07:09.211010"
+    "done": true,
+    "rows": 0,
+    "file": "/Users/brunobrumbrum/Documents/data/car_price_prediction/coches_net/ford_focus_2018.csv",
+    "timestamp": "2026-04-22T18:52:38.305108"
   },
   "hyundai|tucson|2020": {
-    "done": false,
-    "error": "Browser.new_context: Connection closed while reading from the driver",
-    "timestamp": "2026-04-16T09:07:25.444468"
+    "done": true,
+    "rows": 0,
+    "file": "/Users/brunobrumbrum/Documents/data/car_price_prediction/coches_net/hyundai_tucson_2020.csv",
+    "timestamp": "2026-04-22T18:53:55.287977"
   },
   "citroen|c5 aircross|2019": {
     "done": false,

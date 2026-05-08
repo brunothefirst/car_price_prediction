@@ -36,6 +36,12 @@ class CarDataProcessor:
         IQR multiplier for horsepower outlier detection
     min_year : int, default=1990
         Minimum car year to keep (removes antique cars)
+    large_group_threshold : int, default=50
+        (brand, year) groups with at least this many cars use direct IQR;
+        smaller groups pool year±1 neighbours before computing bounds.
+    min_group_size : int, default=10
+        Minimum pool size (after year±1 expansion) required to compute IQR
+        bounds.  Groups below this threshold are dropped entirely.
     verbose : bool, default=True
         Whether to print progress messages
     """
@@ -47,6 +53,8 @@ class CarDataProcessor:
         km_iqr_multiplier: float = 1.5,
         hp_iqr_multiplier: float = 1.5,
         min_year: int = 1990,
+        large_group_threshold: int = 50,
+        min_group_size: int = 10,
         verbose: bool = True
     ):
         self.min_brand_count = min_brand_count
@@ -54,6 +62,8 @@ class CarDataProcessor:
         self.km_iqr_multiplier = km_iqr_multiplier
         self.hp_iqr_multiplier = hp_iqr_multiplier
         self.min_year = min_year
+        self.large_group_threshold = large_group_threshold
+        self.min_group_size = min_group_size
         self.verbose = verbose
         
         # Store statistics for later inspection
@@ -379,76 +389,188 @@ class CarDataProcessor:
     
     def _remove_outliers_iqr(self, df: pl.DataFrame) -> pl.DataFrame:
         """
-        Remove outliers using per-brand IQR method for price and km.
-        
+        Remove outliers using per-(brand, year) IQR method for log-price and km.
+
+        For each (brand, year) group:
+        - n >= large_group_threshold : IQR computed directly on that group.
+        - n < large_group_threshold  : pool the group with year-1 and year+1 rows
+          of the same brand, then compute IQR on the wider pool.
+        - pool < min_group_size      : group is dropped entirely (too sparse to
+          compute meaningful bounds).  A line is printed for each dropped group.
+
         Parameters
         ----------
         df : pl.DataFrame
-            DataFrame with price, km, and brand columns
-            
+            DataFrame with price, km, brand, year, model, energie, horsepower
+
         Returns
         -------
         pl.DataFrame
-            DataFrame with outliers removed
+            DataFrame with outliers and sparse-group rows removed
         """
-        self._log(f"\n6️⃣ Removing price/km outliers (IQR {self.price_iqr_multiplier}× for price, {self.km_iqr_multiplier}× for km)...")
-        
-        # Add log-transformed price and filter invalid data
-        df_prepared = df.with_columns([
-            (pl.col('price') + 1).log().alias('log_price')
-        ]).filter(
-            (pl.col('price').is_not_null()) & 
-            (pl.col('km').is_not_null()) &
-            (pl.col('year').is_not_null()) &
-            (pl.col('price') > 0) &
-            (pl.col('km') >= 0)
+        self._log(
+            f"\n6️⃣ Removing price/km outliers "
+            f"(brand+year IQR {self.price_iqr_multiplier}×; "
+            f"large_group≥{self.large_group_threshold}; "
+            f"min_pool={self.min_group_size})..."
         )
-        
-        # Calculate per-brand IQR boundaries
-        bounds = df_prepared.group_by('brand').agg([
-            # Log price boundaries
-            pl.col('log_price').quantile(0.25).alias('q1_log_price'),
-            pl.col('log_price').quantile(0.75).alias('q3_log_price'),
-            # Kilometers boundaries  
-            pl.col('km').quantile(0.25).alias('q1_km'),
-            pl.col('km').quantile(0.75).alias('q3_km'),
-            pl.len().alias('brand_count')
-        ]).with_columns([
-            # Calculate IQR
-            (pl.col('q3_log_price') - pl.col('q1_log_price')).alias('iqr_log_price'),
-            (pl.col('q3_km') - pl.col('q1_km')).alias('iqr_km')
-        ]).with_columns([
-            # Calculate boundaries
-            (pl.col('q1_log_price') - self.price_iqr_multiplier * pl.col('iqr_log_price')).alias('lower_bound_log_price'),
-            (pl.col('q3_log_price') + self.price_iqr_multiplier * pl.col('iqr_log_price')).alias('upper_bound_log_price'),
-            (pl.col('q1_km') - self.km_iqr_multiplier * pl.col('iqr_km')).alias('lower_bound_km'),
-            (pl.col('q3_km') + self.km_iqr_multiplier * pl.col('iqr_km')).alias('upper_bound_km')
-        ])
-        
-        # Join bounds and filter outliers
-        df_with_bounds = df_prepared.join(bounds, on='brand', how='left')
-        
-        rows_before = df_with_bounds.height
-        df_clean = df_with_bounds.filter(
-            (pl.col('log_price') >= pl.col('lower_bound_log_price')) &
-            (pl.col('log_price') <= pl.col('upper_bound_log_price')) &
-            (pl.col('km') >= pl.col('lower_bound_km')) &
-            (pl.col('km') <= pl.col('upper_bound_km'))
-        ).select(['price', 'year', 'km', 'brand', 'model', 'energie', 'horsepower'])
-        
-        rows_after = df_clean.height
-        
+
+        # ── Prepare: add log1p price, cast year, drop invalid rows ───────────
+        df_prepared = (
+            df
+            .with_columns([
+                (pl.col('price') + 1).log().alias('log_price'),
+                pl.col('year').cast(pl.Int32).alias('year'),
+            ])
+            .filter(
+                pl.col('price').is_not_null()
+                & pl.col('km').is_not_null()
+                & pl.col('year').is_not_null()
+                & (pl.col('price') > 0)
+                & (pl.col('km') >= 0)
+            )
+        )
+
+        rows_before = df_prepared.height
+
+        # ── Group sizes ───────────────────────────────────────────────────────
+        group_sizes = (
+            df_prepared
+            .group_by(['brand', 'year'])
+            .agg(pl.len().alias('n_group'))
+        )
+
+        large_keys = (
+            group_sizes
+            .filter(pl.col('n_group') >= self.large_group_threshold)
+            .select(['brand', 'year'])
+        )
+        small_keys = (
+            group_sizes
+            .filter(pl.col('n_group') < self.large_group_threshold)
+            .select(['brand', 'year'])
+            .to_pandas()
+        )
+
+        # ── Helper: compute IQR bounds for a pandas Series ───────────────────
+        def _iqr_bounds(series, mult):
+            q1, q3 = series.quantile(0.25), series.quantile(0.75)
+            iqr = q3 - q1
+            return q1 - mult * iqr, q3 + mult * iqr
+
+        # ── Large groups: vectorised Polars ───────────────────────────────────
+        large_bounds_pl = (
+            df_prepared
+            .join(large_keys, on=['brand', 'year'], how='inner')
+            .group_by(['brand', 'year'])
+            .agg([
+                pl.col('log_price').quantile(0.25).alias('q1_lp'),
+                pl.col('log_price').quantile(0.75).alias('q3_lp'),
+                pl.col('km').quantile(0.25).alias('q1_km'),
+                pl.col('km').quantile(0.75).alias('q3_km'),
+            ])
+            .with_columns([
+                (pl.col('q3_lp') - pl.col('q1_lp')).alias('iqr_lp'),
+                (pl.col('q3_km') - pl.col('q1_km')).alias('iqr_km'),
+            ])
+            .with_columns([
+                (pl.col('q1_lp') - self.price_iqr_multiplier * pl.col('iqr_lp')).alias('lo_lp'),
+                (pl.col('q3_lp') + self.price_iqr_multiplier * pl.col('iqr_lp')).alias('hi_lp'),
+                (pl.col('q1_km') - self.km_iqr_multiplier * pl.col('iqr_km')).alias('lo_km'),
+                (pl.col('q3_km') + self.km_iqr_multiplier * pl.col('iqr_km')).alias('hi_km'),
+            ])
+            .select(['brand', 'year', 'lo_lp', 'hi_lp', 'lo_km', 'hi_km'])
+        )
+
+        # ── Small groups: iterate, pool year±1, compute IQR in pandas ────────
+        df_pd = df_prepared.select(['brand', 'year', 'log_price', 'km']).to_pandas()
+        n_dropped_tiny = 0
+        small_rows: list[dict] = []
+
+        for _, row in small_keys.iterrows():
+            brand = row['brand']
+            year  = int(row['year'])
+            pool  = df_pd[
+                (df_pd['brand'] == brand)
+                & (df_pd['year'] >= year - 1)
+                & (df_pd['year'] <= year + 1)
+            ]
+            if len(pool) < self.min_group_size:
+                n_dropped_tiny += (
+                    df_pd[(df_pd['brand'] == brand) & (df_pd['year'] == year)].shape[0]
+                )
+                if self.verbose:
+                    pool_size = len(pool)
+                    print(
+                        f"   brand={brand!r:20s}  year={year}  "
+                        f"pool_size={pool_size}  → DROPPED (below min_group_size={self.min_group_size})"
+                    )
+                continue
+
+            lo_lp, hi_lp = _iqr_bounds(pool['log_price'], self.price_iqr_multiplier)
+            lo_km, hi_km = _iqr_bounds(pool['km'],        self.km_iqr_multiplier)
+            small_rows.append({
+                'brand': brand,
+                'year':  year,
+                'lo_lp': float(lo_lp), 'hi_lp': float(hi_lp),
+                'lo_km': float(lo_km), 'hi_km': float(hi_km),
+            })
+
+        small_bounds_pl = pl.DataFrame(
+            small_rows,
+            schema={
+                'brand': pl.Utf8,
+                'year':  pl.Int32,
+                'lo_lp': pl.Float64,
+                'hi_lp': pl.Float64,
+                'lo_km': pl.Float64,
+                'hi_km': pl.Float64,
+            },
+        ) if small_rows else pl.DataFrame(
+            schema={
+                'brand': pl.Utf8,
+                'year':  pl.Int32,
+                'lo_lp': pl.Float64,
+                'hi_lp': pl.Float64,
+                'lo_km': pl.Float64,
+                'hi_km': pl.Float64,
+            }
+        )
+
+        # ── Combine bounds and apply filter ───────────────────────────────────
+        all_bounds = pl.concat([large_bounds_pl, small_bounds_pl])
+
+        df_with_bounds = df_prepared.join(all_bounds, on=['brand', 'year'], how='left')
+
+        df_clean = (
+            df_with_bounds
+            .filter(
+                pl.col('lo_lp').is_not_null()          # drops tiny groups
+                & (pl.col('log_price') >= pl.col('lo_lp'))
+                & (pl.col('log_price') <= pl.col('hi_lp'))
+                & (pl.col('km') >= pl.col('lo_km'))
+                & (pl.col('km') <= pl.col('hi_km'))
+            )
+            .select(['price', 'year', 'km', 'brand', 'model', 'energie', 'horsepower'])
+        )
+
+        rows_after   = df_clean.height
+        n_iqr_removed = rows_before - rows_after - n_dropped_tiny
+
         self.cleaning_stats['outlier_removal'] = {
-            'rows_before': rows_before,
-            'rows_after': rows_after,
-            'rows_removed': rows_before - rows_after,
-            'pct_removed': ((rows_before - rows_after) / rows_before) * 100
+            'rows_before':           rows_before,
+            'rows_after':            rows_after,
+            'rows_removed':          rows_before - rows_after,
+            'pct_removed':           ((rows_before - rows_after) / rows_before) * 100,
+            'n_dropped_iqr':         n_iqr_removed,
+            'n_dropped_small_groups': n_dropped_tiny,
         }
-        
-        self._log(f"   Before: {rows_before:,} rows")
-        self._log(f"   After: {rows_after:,} rows")
-        self._log(f"   Removed: {rows_before - rows_after:,} ({((rows_before - rows_after) / rows_before) * 100:.1f}%)")
-        
+
+        self._log(f"   Before         : {rows_before:,} rows")
+        self._log(f"   Removed by IQR : {n_iqr_removed:,}")
+        self._log(f"   Removed (tiny groups < {self.min_group_size}): {n_dropped_tiny:,}")
+        self._log(f"   After          : {rows_after:,} rows  ({((rows_before - rows_after) / rows_before) * 100:.1f}% removed total)")
+
         return df_clean
     
     def get_cleaning_summary(self) -> Dict:
@@ -605,6 +727,8 @@ def clean_car_data(
     km_iqr_multiplier: float = 1.5,
     hp_iqr_multiplier: float = 1.5,
     min_year: int = 1990,
+    large_group_threshold: int = 50,
+    min_group_size: int = 10,
     verbose: bool = True
 ) -> pl.DataFrame:
     """
@@ -624,6 +748,11 @@ def clean_car_data(
         IQR multiplier for horsepower
     min_year : int, default=1990
         Minimum car year
+    large_group_threshold : int, default=50
+        (brand, year) groups with at least this many cars use direct IQR
+    min_group_size : int, default=10
+        Minimum pool size (after year±1 expansion) to compute IQR bounds;
+        groups below this threshold are dropped entirely
     verbose : bool, default=True
         Print progress messages
         
@@ -638,6 +767,8 @@ def clean_car_data(
         km_iqr_multiplier=km_iqr_multiplier,
         hp_iqr_multiplier=hp_iqr_multiplier,
         min_year=min_year,
+        large_group_threshold=large_group_threshold,
+        min_group_size=min_group_size,
         verbose=verbose
     )
     

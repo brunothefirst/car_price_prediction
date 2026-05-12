@@ -36,10 +36,16 @@ class CarDataProcessor:
         IQR multiplier for horsepower outlier detection
     min_year : int, default=1990
         Minimum car year to keep (removes antique cars)
-    large_group_threshold : int, default=50
+    price_floor : float or None, default=None
+        Hard lower bound on price in €.  Rows below this value are dropped
+        before IQR.  Set to None to skip.
+    price_ceiling : float or None, default=None
+        Hard upper bound on price in €.  Rows above this value are dropped
+        before IQR.  Set to None to skip.
+    iqr_large_group_threshold : int, default=50
         (brand, year) groups with at least this many cars use direct IQR;
         smaller groups pool year±1 neighbours before computing bounds.
-    min_group_size : int, default=10
+    iqr_min_group_size : int, default=10
         Minimum pool size (after year±1 expansion) required to compute IQR
         bounds.  Groups below this threshold are dropped entirely.
     verbose : bool, default=True
@@ -53,8 +59,10 @@ class CarDataProcessor:
         km_iqr_multiplier: float = 1.5,
         hp_iqr_multiplier: float = 1.5,
         min_year: int = 1990,
-        large_group_threshold: int = 50,
-        min_group_size: int = 10,
+        price_floor: Optional[float] = None,
+        price_ceiling: Optional[float] = None,
+        iqr_large_group_threshold: int = 50,
+        iqr_min_group_size: int = 10,
         verbose: bool = True
     ):
         self.min_brand_count = min_brand_count
@@ -62,8 +70,10 @@ class CarDataProcessor:
         self.km_iqr_multiplier = km_iqr_multiplier
         self.hp_iqr_multiplier = hp_iqr_multiplier
         self.min_year = min_year
-        self.large_group_threshold = large_group_threshold
-        self.min_group_size = min_group_size
+        self.price_floor = price_floor
+        self.price_ceiling = price_ceiling
+        self.iqr_large_group_threshold = iqr_large_group_threshold
+        self.iqr_min_group_size = iqr_min_group_size
         self.verbose = verbose
         
         # Store statistics for later inspection
@@ -120,6 +130,9 @@ class CarDataProcessor:
         
         # Step 1: Data type conversion and text normalization
         df = self._convert_data_types(df)
+
+        # Step 1b: Hard price bounds (optional)
+        df = self._apply_price_bounds(df)
         
         # Step 2: Remove antique cars
         df = self._remove_antique_cars(df)
@@ -214,6 +227,42 @@ class CarDataProcessor:
         
         return df_clean
     
+    def _apply_price_bounds(self, df: pl.DataFrame) -> pl.DataFrame:
+        """
+        Drop rows outside hard price bounds (floor / ceiling).
+
+        Both bounds are optional (None = not applied).  Runs after type
+        conversion so the price column is already numeric.
+        """
+        if self.price_floor is None and self.price_ceiling is None:
+            return df
+
+        self._log("\n1️⃣b Applying hard price bounds...")
+        rows_before = df.height
+
+        mask = pl.lit(True)
+        if self.price_floor is not None:
+            mask = mask & (pl.col('price') >= self.price_floor)
+        if self.price_ceiling is not None:
+            mask = mask & (pl.col('price') <= self.price_ceiling)
+
+        df_bounded = df.filter(mask)
+        n_below = (df['price'] < self.price_floor).sum() if self.price_floor is not None else 0
+        n_above = (df['price'] > self.price_ceiling).sum() if self.price_ceiling is not None else 0
+
+        self.cleaning_stats['price_bounds'] = {
+            'rows_before': rows_before,
+            'rows_after': df_bounded.height,
+            'dropped_below_floor': int(n_below),
+            'dropped_above_ceiling': int(n_above),
+        }
+
+        self._log(f"   Price floor  : {self.price_floor} € — dropped {int(n_below):,} rows")
+        self._log(f"   Price ceiling: {self.price_ceiling} € — dropped {int(n_above):,} rows")
+        self._log(f"   Remaining    : {df_bounded.height:,} rows")
+
+        return df_bounded
+
     def _filter_rare_brands(self, df: pl.DataFrame) -> pl.DataFrame:
         """
         Drop brands with fewer than min_brand_count observations.
@@ -392,10 +441,10 @@ class CarDataProcessor:
         Remove outliers using per-(brand, year) IQR method for log-price and km.
 
         For each (brand, year) group:
-        - n >= large_group_threshold : IQR computed directly on that group.
-        - n < large_group_threshold  : pool the group with year-1 and year+1 rows
+        - n >= iqr_large_group_threshold : IQR computed directly on that group.
+        - n < iqr_large_group_threshold  : pool the group with year-1 and year+1 rows
           of the same brand, then compute IQR on the wider pool.
-        - pool < min_group_size      : group is dropped entirely (too sparse to
+        - pool < iqr_min_group_size      : group is dropped entirely (too sparse to
           compute meaningful bounds).  A line is printed for each dropped group.
 
         Parameters
@@ -411,8 +460,8 @@ class CarDataProcessor:
         self._log(
             f"\n6️⃣ Removing price/km outliers "
             f"(brand+year IQR {self.price_iqr_multiplier}×; "
-            f"large_group≥{self.large_group_threshold}; "
-            f"min_pool={self.min_group_size})..."
+            f"iqr_large_group≥{self.iqr_large_group_threshold}; "
+            f"iqr_min_pool={self.iqr_min_group_size})..."
         )
 
         # ── Prepare: add log1p price, cast year, drop invalid rows ───────────
@@ -442,12 +491,12 @@ class CarDataProcessor:
 
         large_keys = (
             group_sizes
-            .filter(pl.col('n_group') >= self.large_group_threshold)
+            .filter(pl.col('n_group') >= self.iqr_large_group_threshold)
             .select(['brand', 'year'])
         )
         small_keys = (
             group_sizes
-            .filter(pl.col('n_group') < self.large_group_threshold)
+            .filter(pl.col('n_group') < self.iqr_large_group_threshold)
             .select(['brand', 'year'])
             .to_pandas()
         )
@@ -495,7 +544,7 @@ class CarDataProcessor:
                 & (df_pd['year'] >= year - 1)
                 & (df_pd['year'] <= year + 1)
             ]
-            if len(pool) < self.min_group_size:
+            if len(pool) < self.iqr_min_group_size:
                 n_dropped_tiny += (
                     df_pd[(df_pd['brand'] == brand) & (df_pd['year'] == year)].shape[0]
                 )
@@ -503,7 +552,7 @@ class CarDataProcessor:
                     pool_size = len(pool)
                     print(
                         f"   brand={brand!r:20s}  year={year}  "
-                        f"pool_size={pool_size}  → DROPPED (below min_group_size={self.min_group_size})"
+                        f"pool_size={pool_size}  → DROPPED (below iqr_min_group_size={self.iqr_min_group_size})"
                     )
                 continue
 
@@ -568,7 +617,7 @@ class CarDataProcessor:
 
         self._log(f"   Before         : {rows_before:,} rows")
         self._log(f"   Removed by IQR : {n_iqr_removed:,}")
-        self._log(f"   Removed (tiny groups < {self.min_group_size}): {n_dropped_tiny:,}")
+        self._log(f"   Removed (tiny groups < {self.iqr_min_group_size}): {n_dropped_tiny:,}")
         self._log(f"   After          : {rows_after:,} rows  ({((rows_before - rows_after) / rows_before) * 100:.1f}% removed total)")
 
         return df_clean
@@ -727,8 +776,10 @@ def clean_car_data(
     km_iqr_multiplier: float = 1.5,
     hp_iqr_multiplier: float = 1.5,
     min_year: int = 1990,
-    large_group_threshold: int = 50,
-    min_group_size: int = 10,
+    price_floor: Optional[float] = None,
+    price_ceiling: Optional[float] = None,
+    iqr_large_group_threshold: int = 50,
+    iqr_min_group_size: int = 10,
     verbose: bool = True
 ) -> pl.DataFrame:
     """
@@ -748,9 +799,13 @@ def clean_car_data(
         IQR multiplier for horsepower
     min_year : int, default=1990
         Minimum car year
-    large_group_threshold : int, default=50
+    price_floor : float or None, default=None
+        Hard lower bound on price in €.  None = not applied.
+    price_ceiling : float or None, default=None
+        Hard upper bound on price in €.  None = not applied.
+    iqr_large_group_threshold : int, default=50
         (brand, year) groups with at least this many cars use direct IQR
-    min_group_size : int, default=10
+    iqr_min_group_size : int, default=10
         Minimum pool size (after year±1 expansion) to compute IQR bounds;
         groups below this threshold are dropped entirely
     verbose : bool, default=True
@@ -767,8 +822,10 @@ def clean_car_data(
         km_iqr_multiplier=km_iqr_multiplier,
         hp_iqr_multiplier=hp_iqr_multiplier,
         min_year=min_year,
-        large_group_threshold=large_group_threshold,
-        min_group_size=min_group_size,
+        price_floor=price_floor,
+        price_ceiling=price_ceiling,
+        iqr_large_group_threshold=iqr_large_group_threshold,
+        iqr_min_group_size=iqr_min_group_size,
         verbose=verbose
     )
     

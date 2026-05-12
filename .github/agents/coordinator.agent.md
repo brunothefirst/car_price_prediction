@@ -25,7 +25,7 @@ You read the request, identify which specialist is needed, and delegate clearly.
 
 # Project context
 
-This project builds a defensible price range (p50 median and p85 upper bound) for any
+This project builds a defensible price range (p15 lower bound, p50 median and p85 upper bound) for any
 used car described by brand, model, year, and optionally km/fuel/power. The benchmark is
 used by customs analysts to assess whether cars imported from African countries are
 under-declared at customs. The data source is LeBonCoin (French second-hand marketplace).

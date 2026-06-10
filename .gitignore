@@ -5,6 +5,9 @@
 data/*
 !data/.gitkeep
 
+# External raw extractions copied in locally (never commit ~700k-row CSVs)
+data/external/
+
 # Models directory
 models/*
 !models/.gitkeep

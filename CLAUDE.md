@@ -10,6 +10,7 @@ This project builds a French used-car price benchmark to assess whether cars imp
 - **Hypothesis:** Declared import prices are systematically lower than French market values
 - **Output:** A price range — p50 (median benchmark) and p85 (upper confidence bound) — for any car described by brand, model, year, and optionally km/fuel/power
 - **Current stage:** Research and model validation. Output is consumed via manual analysis. An API is planned once models are stable.
+- **Current plan:** See `docs/next_steps_roadmap.md` for the prioritized next steps (NB13–NB17: Oct+Dec merge, CV harness, imbalance experiments, conformal calibration, customs re-evaluation). Follow it when asked to continue the project.
 
 ## Data
 
